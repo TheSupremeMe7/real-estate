@@ -17,16 +17,44 @@ LISTING_COLUMNS = [
     "room_count",
     "price",
     "gross_m2",
+    "net_m2",
+    "building_age",
+    "floor",
+    "total_floors",
+    "bathroom_count",
+    "heating",
+    "facade",
     "balcony",
     "in_complex",
     "near_metro",
+    "furnished",
+    "elevator",
+    "parking",
+    "security",
+    "view",
+    "outdoor_space",
+    "kitchen_type",
+    "deed_status",
+    "credit_eligible",
+    "usage_status",
+    "dues",
+    "amenities",
+    "nearby_places",
+    "technical_details",
     "description",
     "highlight",
     "listing_url",
     "image_url",
     "status",
 ]
-BOOLEAN_COLUMNS = ["balcony", "in_complex", "near_metro"]
+BOOLEAN_COLUMNS = [
+    "balcony", "in_complex", "near_metro", "furnished", "elevator",
+    "credit_eligible",
+]
+NUMERIC_COLUMNS = [
+    "price", "gross_m2", "net_m2", "building_age", "total_floors",
+    "bathroom_count", "dues",
+]
 
 
 def create_service(credentials_source: Path | dict):
@@ -75,32 +103,28 @@ def load_sheet_listings(
     ensure_listings_tab(service, spreadsheet_id)
     response = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
-        range=f"{LISTINGS_TAB}!A:Q",
+        range=f"{LISTINGS_TAB}!A:AZ",
     ).execute()
     rows = response.get("values", [])
 
     if not rows:
         upload_initial_listings(service, spreadsheet_id, sample_listings)
         return sample_listings.copy()
-    if rows[0] != LISTING_COLUMNS:
-        if rows[0] == [column for column in LISTING_COLUMNS if column != "highlight"]:
-            rows[0].insert(13, "highlight")
-            for row in rows[1:]:
-                row.insert(13, "")
-            service.spreadsheets().values().update(
-                spreadsheetId=spreadsheet_id,
-                range=f"{LISTINGS_TAB}!A1",
-                valueInputOption="RAW",
-                body={"values": rows},
-            ).execute()
-        else:
-            raise ValueError(f"Listings başlıkları şu sırada olmalı: {', '.join(LISTING_COLUMNS)}")
-
-    normalized_rows = [row + [""] * (len(LISTING_COLUMNS) - len(row)) for row in rows[1:]]
-    listings = pd.DataFrame(normalized_rows, columns=LISTING_COLUMNS)
+    headers = rows[0]
+    essential = {"listing_id", "title", "price", "description", "status"}
+    if not essential.issubset(headers):
+        raise ValueError(f"Listings zorunlu başlıkları eksik: {', '.join(sorted(essential - set(headers)))}")
+    source_rows = [row + [""] * (len(headers) - len(row)) for row in rows[1:]]
+    source = pd.DataFrame(source_rows, columns=headers)
+    for column in LISTING_COLUMNS:
+        if column not in source.columns:
+            source[column] = ""
+    listings = source[LISTING_COLUMNS].copy()
+    if headers != LISTING_COLUMNS:
+        upload_initial_listings(service, spreadsheet_id, listings)
     listings = listings[listings["listing_id"].str.strip().ne("")]
-    listings["price"] = pd.to_numeric(listings["price"], errors="coerce").fillna(0).astype(int)
-    listings["gross_m2"] = pd.to_numeric(listings["gross_m2"], errors="coerce").fillna(0).astype(int)
+    for column in NUMERIC_COLUMNS:
+        listings[column] = pd.to_numeric(listings[column], errors="coerce").fillna(0).astype(int)
     for column in BOOLEAN_COLUMNS:
         listings[column] = listings[column].astype(str).str.lower().isin({"true", "1", "evet", "yes"})
     listings = listings[listings["status"].astype(str).str.lower().eq("active")]

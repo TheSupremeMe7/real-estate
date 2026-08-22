@@ -2,6 +2,8 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from feature_catalog import PROPERTY_FEATURE_CATALOG
+
 
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 
@@ -36,11 +38,21 @@ Kurallar:
 - Söylenmeyen özellikler için null veya boş liste kullan.
 - "8 milyon altı" ifadesini 8000000 olarak yaz.
 - İlçe ve oda değerlerini mümkünse aşağıdaki mevcut seçeneklerle aynı yaz.
-- must_have zorunlu, nice_to_have tercih edilen özelliklerdir.
+- Balkon, site, metro, oda, konut tipi, bölge, fiyat ve metrekareyi kendi
+  alanlarına yaz; bunları must_have veya nice_to_have içinde tekrarlama.
+- Bahçe, deniz manzarası, otopark, teras, havuz, yüksek tavan, ev ofisi gibi
+  diğer tüm özellikleri kısa Türkçe arama terimleri olarak çıkar.
+- "mutlaka", "şart", "olmalı", "istiyorum" denilen ek özellikleri must_have;
+  "olsa iyi olur", "tercihen" denilenleri nice_to_have içine yaz.
+- "metro olsa iyi olur" gibi tercih cümlelerinde near_metro alanını null bırak ve
+  "metroya yakın" ifadesini nice_to_have içine yaz. Aynı kural balkon ve site
+  tercihleri için de geçerlidir; boolean alanları yalnızca zorunluysa true yap.
 - summary kısa ve Türkçe olsun.
 
 Mevcut ilçeler: {available_districts}
 Mevcut oda seçenekleri: {available_rooms}
+Emlak özellik sözlüğü (örnek ve eş anlam referansı, bununla sınırlı değilsin):
+{PROPERTY_FEATURE_CATALOG}
 
 Müşteri talebi:
 {request}

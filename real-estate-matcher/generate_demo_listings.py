@@ -66,6 +66,35 @@ EXTRA_DETAILS = [
     "engelsiz giriş ve geniş asansörle her yaş için rahat kullanım sağlıyor",
 ]
 
+HEATING = ["Yerden ısıtma", "Doğalgaz kombi", "Merkezi sistem", "Isı pompası", "Fan coil"]
+FACADES = ["Güney-Doğu", "Kuzey-Güney", "Güney-Batı", "Doğu", "Batı"]
+PARKING = ["Kapalı otopark", "Açık otopark", "2 araçlık kapalı otopark", "Kapalı + açık otopark"]
+SECURITY = ["7/24 güvenlik ve kamera", "Güvenlikli giriş", "Resepsiyon ve kamera", "Akıllı diafon"]
+VIEWS = ["Şehir", "Peyzaj", "Orman", "Deniz", "Vadi", "Park"]
+OUTDOOR = ["Geniş balkon", "Özel bahçe", "Teras", "Fransız balkon", "Kış bahçesi"]
+KITCHENS = ["Kapalı mutfak", "Ada mutfak", "Amerikan mutfak", "Yarı açık mutfak"]
+AMENITY_SETS = [
+    "Yüzme havuzu; spor salonu; çocuk parkı; yürüyüş parkuru",
+    "Peyzajlı bahçe; sosyal tesis; basketbol sahası; bisiklet parkı",
+    "Sauna; kapalı havuz; pilates salonu; dinlenme alanı",
+    "Çocuk kulübü; hobi odası; toplantı salonu; misafir otoparkı",
+    "Barbekü alanı; pergola; tenis kortu; evcil hayvan alanı",
+]
+NEARBY_SETS = [
+    "Metro 450 m; market 120 m; okul 600 m; hastane 2,1 km",
+    "Otobüs 180 m; park 250 m; AVM 1,4 km; eczane 300 m",
+    "Sahil 700 m; kafe 150 m; spor tesisi 900 m; okul 500 m",
+    "Ana yol 350 m; üniversite 1,8 km; market 200 m; hastane 1,2 km",
+    "Marmaray 800 m; çocuk parkı 100 m; çarşı 550 m; eczane 220 m",
+]
+TECHNICAL_SETS = [
+    "Isı ve ses yalıtımı; çift cam; fiber internet; görüntülü diafon",
+    "Akıllı ev altyapısı; elektrikli panjur; yangın alarmı; jeneratör",
+    "Güneş paneli altyapısı; su deposu; merkezi uydu; çelik kapı",
+    "VRF klima; ankastre set; yerden ısıtma; yüksek hızlı internet",
+    "Deprem yönetmeliğine uygun; sprinkler; duman dedektörü; hidrofor",
+]
+
 
 def make_listings(count: int = 100) -> pd.DataFrame:
     rows = []
@@ -78,6 +107,10 @@ def make_listings(count: int = 100) -> pd.DataFrame:
         if property_type in {"Villa", "Müstakil Ev"}:
             gross_m2 += 90
         price = 2_150_000 + gross_m2 * 41_000 + (index % 12) * 175_000
+        net_m2 = round(gross_m2 * (0.78 + (index % 6) * 0.015))
+        total_floors = 4 + index % 16
+        floor = "Bahçe katı" if property_type == "Bahçe Katı" else str(1 + index % total_floors)
+        bathrooms = max(1, min(4, room_total // 2))
         highlight = (
             f"{HIGHLIGHTS[index % len(HIGHLIGHTS)]}; "
             f"{EXTRA_DETAILS[(index // len(HIGHLIGHTS)) % len(EXTRA_DETAILS)]}"
@@ -96,9 +129,30 @@ def make_listings(count: int = 100) -> pd.DataFrame:
                 "room_count": room,
                 "price": price,
                 "gross_m2": gross_m2,
+                "net_m2": net_m2,
+                "building_age": index % 16,
+                "floor": floor,
+                "total_floors": total_floors,
+                "bathroom_count": bathrooms,
+                "heating": HEATING[index % len(HEATING)],
+                "facade": FACADES[index % len(FACADES)],
                 "balcony": balcony,
                 "in_complex": in_complex,
                 "near_metro": near_metro,
+                "furnished": index % 6 == 0,
+                "elevator": total_floors > 4,
+                "parking": PARKING[index % len(PARKING)],
+                "security": SECURITY[index % len(SECURITY)],
+                "view": VIEWS[index % len(VIEWS)],
+                "outdoor_space": OUTDOOR[index % len(OUTDOOR)],
+                "kitchen_type": KITCHENS[index % len(KITCHENS)],
+                "deed_status": "Kat mülkiyetli",
+                "credit_eligible": index % 9 != 0,
+                "usage_status": "Boş" if index % 3 else "Mülk sahibi oturuyor",
+                "dues": 900 + (index % 12) * 275,
+                "amenities": AMENITY_SETS[index % len(AMENITY_SETS)],
+                "nearby_places": NEARBY_SETS[index % len(NEARBY_SETS)],
+                "technical_details": TECHNICAL_SETS[index % len(TECHNICAL_SETS)],
                 "description": f"{neighborhood} merkezine yakın, iyi planlanmış {gross_m2} m² yaşam alanı. {highlight}.",
                 "highlight": highlight,
                 "listing_url": f"https://example.com/ilan/ILN-{index + 1:03d}",
