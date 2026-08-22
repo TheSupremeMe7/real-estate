@@ -343,7 +343,7 @@ def main() -> None:
         )
 
     load_dotenv(ENV_FILE, override=True)
-    gemini_enabled = setting("ENABLE_GEMINI", "false").lower() == "true"
+    gemini_enabled = setting("ENABLE_GEMINI", "true").lower() == "true"
     gemini_key = setting("GEMINI_API_KEY")
     if search_clicked and request:
         if detailed_ai and gemini_enabled and gemini_key:
