@@ -99,6 +99,7 @@ def feature_matches_listing(feature: str, listing: pd.Series) -> bool:
             "title", "property_type", "description", "highlight", "heating",
             "facade", "parking", "security", "view", "outdoor_space",
             "kitchen_type", "amenities", "nearby_places", "technical_details",
+            "building_features",
         )
     ).casefold()
     feature_text = feature.casefold().strip()
@@ -324,6 +325,12 @@ def build_customer_report(
                 f"Site olanakları: {listing.get('amenities', '-')}",
                 f"Yakın çevre: {listing.get('nearby_places', '-')}",
                 f"Teknik: {listing.get('technical_details', '-')}",
+                "Bina özellikleri:",
+                *[
+                    f"- {feature.strip()}"
+                    for feature in str(listing.get("building_features", "")).split(";")
+                    if feature.strip()
+                ],
                 f"Fiyat: {format_price(int(listing['price']))}",
                 f"Öne çıkanlar: {', '.join(reasons[:4])}",
                 f"Puan dökümü: {score_details}",
@@ -725,6 +732,14 @@ def main() -> None:
                     st.markdown(f"**Site olanakları:** {listing.get('amenities', '-')}")
                     st.markdown(f"**Yakın çevre:** {listing.get('nearby_places', '-')}")
                     st.markdown(f"**Teknik donanım:** {listing.get('technical_details', '-')}")
+                    st.markdown("**Bina özellikleri**")
+                    building_features = [
+                        feature.strip()
+                        for feature in str(listing.get("building_features", "")).split(";")
+                        if feature.strip()
+                    ]
+                    for feature in building_features:
+                        st.markdown(f"- {feature}")
                 with st.expander("Eşleşme hesabı"):
                     for criterion in breakdown:
                         ratio = float(criterion["earned"]) / float(criterion["possible"])

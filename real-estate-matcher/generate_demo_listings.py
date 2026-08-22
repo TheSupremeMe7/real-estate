@@ -94,9 +94,41 @@ TECHNICAL_SETS = [
     "VRF klima; ankastre set; yerden ısıtma; yüksek hızlı internet",
     "Deprem yönetmeliğine uygun; sprinkler; duman dedektörü; hidrofor",
 ]
+BUILDING_FEATURE_POOL = [
+    "Güncel deprem yönetmeliğine uygun betonarme taşıyıcı sistem",
+    "Radye temel ve perde beton uygulaması",
+    "Dış cephede yüksek performanslı ısı yalıtımı",
+    "Daireler arasında güçlendirilmiş ses yalıtımı",
+    "Isı kontrollü çift camlı pencere sistemi",
+    "Kesintilerde ortak alanları besleyen jeneratör",
+    "Yangın algılama, alarm ve acil yönlendirme sistemi",
+    "Merdivenlerde basınçlandırma ve duman tahliye sistemi",
+    "Kartlı bina girişi ve görüntülü diafon",
+    "Ortak alanlarda sürekli kamera kaydı",
+    "Engelsiz bina girişi ve sedye ölçüsüne uygun asansör",
+    "Kapalı otoparktan kata doğrudan asansör erişimi",
+    "Elektrikli araç şarj ünitesi altyapısı",
+    "Fiber internet ve merkezi uydu altyapısı",
+    "Su deposu, hidrofor ve basınç dengeleme sistemi",
+    "Ortak alanlarda enerji tasarruflu LED aydınlatma",
+    "Profesyonel bina ve peyzaj yönetimi",
+    "Misafir araçları için ayrılmış otopark alanı",
+    "Bebek arabası ve bisikletler için kapalı park alanı",
+    "Güvenli çocuk oyun alanı ve yumuşak zemin",
+    "Blok girişinde korunaklı bekleme ve teslimat alanı",
+    "Yağmur suyu kontrollü peyzaj sulama sistemi",
+    "Çatı ve temel seviyesinde su yalıtımı",
+    "Bakımlı bina lobisi ve dayanıklı ortak alan kaplamaları",
+    "Acil durumlar için işaretli toplanma alanı",
+    "Bina genelinde düzenli teknik bakım planı",
+    "Daire başına ayrılmış kilitli depo bölümü",
+    "Çöp toplama ve geri dönüşüm için kapalı servis alanı",
+    "Site girişinde plaka tanıma ve kontrollü araç geçişi",
+    "Ortak kullanıma açık toplantı ve çalışma salonu",
+]
 
 
-def make_listings(count: int = 100) -> pd.DataFrame:
+def make_listings(count: int = 500) -> pd.DataFrame:
     rows = []
     for index in range(count):
         city, district, neighborhood = LOCATIONS[index % len(LOCATIONS)]
@@ -111,9 +143,15 @@ def make_listings(count: int = 100) -> pd.DataFrame:
         total_floors = 4 + index % 16
         floor = "Bahçe katı" if property_type == "Bahçe Katı" else str(1 + index % total_floors)
         bathrooms = max(1, min(4, room_total // 2))
+        building_features = [
+            BUILDING_FEATURE_POOL[(index * 3 + offset) % len(BUILDING_FEATURE_POOL)]
+            for offset in range(10)
+        ]
         highlight = (
             f"{HIGHLIGHTS[index % len(HIGHLIGHTS)]}; "
-            f"{EXTRA_DETAILS[(index // len(HIGHLIGHTS)) % len(EXTRA_DETAILS)]}"
+            f"{EXTRA_DETAILS[(index // len(HIGHLIGHTS)) % len(EXTRA_DETAILS)]}; "
+            f"{4 + index % 17} m² kilitli depo ve "
+            f"{6 + (index // 17) % 30} m² kullanışlı açık alan sunuyor"
         )
         balcony = property_type not in {"Rezidans"} or index % 3 != 0
         in_complex = property_type not in {"Müstakil Ev"} and index % 5 != 0
@@ -153,6 +191,7 @@ def make_listings(count: int = 100) -> pd.DataFrame:
                 "amenities": AMENITY_SETS[index % len(AMENITY_SETS)],
                 "nearby_places": NEARBY_SETS[index % len(NEARBY_SETS)],
                 "technical_details": TECHNICAL_SETS[index % len(TECHNICAL_SETS)],
+                "building_features": "; ".join(building_features),
                 "description": f"{neighborhood} merkezine yakın, iyi planlanmış {gross_m2} m² yaşam alanı. {highlight}.",
                 "highlight": highlight,
                 "listing_url": f"https://example.com/ilan/ILN-{index + 1:03d}",

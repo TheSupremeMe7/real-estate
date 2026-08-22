@@ -41,6 +41,7 @@ LISTING_COLUMNS = [
     "amenities",
     "nearby_places",
     "technical_details",
+    "building_features",
     "description",
     "highlight",
     "listing_url",
