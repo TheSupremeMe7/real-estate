@@ -212,46 +212,66 @@ def score_listing(
     in_complex: bool,
     near_metro: bool,
     requested_features: list[str] | None = None,
-) -> tuple[int, list[str]]:
-    earned_points = 0
-    possible_points = 0
+) -> tuple[int, list[str], list[dict[str, object]]]:
+    earned_points = 0.0
+    possible_points = 0.0
     reasons: list[str] = []
+    breakdown: list[dict[str, object]] = []
+
+    def add_criterion(label: str, weight: int, earned: float, detail: str) -> None:
+        nonlocal earned_points, possible_points
+        possible_points += weight
+        earned_points += earned
+        breakdown.append(
+            {"label": label, "earned": earned, "possible": weight, "detail": detail}
+        )
 
     if max_price > 0:
-        possible_points += 20
-    if max_price > 0 and listing["price"] <= max_price:
-        earned_points += 20
-        reasons.append("Bütçeye uygun")
+        price = int(listing["price"])
+        if price <= max_price:
+            budget_points = 20
+            budget_detail = "Bütçe içinde"
+            reasons.append("Bütçeye uygun")
+        elif price <= max_price * 1.10:
+            budget_points = 10
+            budget_detail = f"Bütçenin %{round((price / max_price - 1) * 100)} üzerinde"
+        elif price <= max_price * 1.25:
+            budget_points = 5
+            budget_detail = f"Bütçenin %{round((price / max_price - 1) * 100)} üzerinde"
+        else:
+            budget_points = 0
+            budget_detail = "Bütçenin belirgin üzerinde"
+        add_criterion("Bütçe", 20, budget_points, budget_detail)
 
     if selected_districts:
-        possible_points += 15
-    if selected_districts and listing["district"] in selected_districts:
-        earned_points += 15
-        reasons.append("Bölge tercihiyle eşleşiyor")
+        matched = listing["district"] in selected_districts
+        add_criterion("İlçe", 15, 15 if matched else 0, str(listing["district"]))
+        if matched:
+            reasons.append("Bölge tercihiyle eşleşiyor")
 
     if selected_neighborhoods:
-        possible_points += 10
-    if selected_neighborhoods and listing["neighborhood"] in selected_neighborhoods:
-        earned_points += 10
-        reasons.append("Mahalle tercihiyle eşleşiyor")
+        matched = listing["neighborhood"] in selected_neighborhoods
+        add_criterion("Mahalle", 10, 10 if matched else 0, str(listing["neighborhood"]))
+        if matched:
+            reasons.append("Mahalle tercihiyle eşleşiyor")
 
     if selected_rooms:
-        possible_points += 15
-    if selected_rooms and listing["room_count"] in selected_rooms:
-        earned_points += 15
-        reasons.append(f"{listing['room_count']} oda planı uygun")
+        matched = listing["room_count"] in selected_rooms
+        add_criterion("Oda planı", 15, 15 if matched else 0, str(listing["room_count"]))
+        if matched:
+            reasons.append(f"{listing['room_count']} oda planı uygun")
 
     if selected_property_types:
-        possible_points += 10
-    if selected_property_types and listing["property_type"] in selected_property_types:
-        earned_points += 10
-        reasons.append(f"{listing['property_type']} tipi uygun")
+        matched = listing["property_type"] in selected_property_types
+        add_criterion("Konut tipi", 10, 10 if matched else 0, str(listing["property_type"]))
+        if matched:
+            reasons.append(f"{listing['property_type']} tipi uygun")
 
     if min_gross_m2 > 0:
-        possible_points += 10
-    if min_gross_m2 > 0 and listing["gross_m2"] >= min_gross_m2:
-        earned_points += 10
-        reasons.append(f"En az {min_gross_m2} m² şartını karşılıyor")
+        matched = int(listing["gross_m2"]) >= min_gross_m2
+        add_criterion("Brüt alan", 10, 10 if matched else 0, f"{listing['gross_m2']} m²")
+        if matched:
+            reasons.append(f"En az {min_gross_m2} m² şartını karşılıyor")
 
     feature_checks = [
         (balcony, bool(listing["balcony"]), "Balkonlu", 8),
@@ -260,21 +280,20 @@ def score_listing(
     ]
     for requested, available, label, weight in feature_checks:
         if requested:
-            possible_points += weight
-        if requested and available:
-            earned_points += weight
-            reasons.append(label)
+            add_criterion(label, weight, weight if available else 0, "Var" if available else "Yok")
+            if available:
+                reasons.append(label)
 
     for feature in requested_features or []:
-        possible_points += 7
-        if feature_matches_listing(feature, listing):
-            earned_points += 7
+        matched = feature_matches_listing(feature, listing)
+        add_criterion(feature.capitalize(), 7, 7 if matched else 0, "Eşleşti" if matched else "Bulunamadı")
+        if matched:
             reasons.append(f"{feature.capitalize()} tercihiyle eşleşiyor")
 
     if possible_points == 0:
-        return 50, ["Karşılaştırma için daha fazla kriter gerekli"]
+        return 50, ["Karşılaştırma için daha fazla kriter gerekli"], []
     score = round(earned_points / possible_points * 100)
-    return score, reasons
+    return score, reasons, breakdown
 
 
 def format_price(price: int) -> str:
@@ -283,13 +302,17 @@ def format_price(price: int) -> str:
 
 def build_customer_report(
     customer_request: str,
-    selected_matches: list[tuple[int, list[str], pd.Series]],
+    selected_matches: list[tuple[int, list[str], list[dict[str, object]], pd.Series]],
 ) -> str:
     lines = ["EMLAK İLAN ÖNERİLERİ", ""]
     if customer_request.strip():
         lines.extend([f"Müşteri talebi: {customer_request.strip()}", ""])
 
-    for index, (score, reasons, listing) in enumerate(selected_matches, start=1):
+    for index, (score, reasons, breakdown, listing) in enumerate(selected_matches, start=1):
+        score_details = "; ".join(
+            f"{item['label']} {item['earned']:.0f}/{item['possible']}"
+            for item in breakdown
+        )
         lines.extend(
             [
                 f"{index}. {listing['title']} - %{score} eşleşme",
@@ -303,6 +326,7 @@ def build_customer_report(
                 f"Teknik: {listing.get('technical_details', '-')}",
                 f"Fiyat: {format_price(int(listing['price']))}",
                 f"Öne çıkanlar: {', '.join(reasons[:4])}",
+                f"Puan dökümü: {score_details}",
                 f"İlan: {listing['listing_url']}",
                 "",
             ]
@@ -598,10 +622,10 @@ def main() -> None:
             f"Talepte algılanan kriterler ({source}): " + " · ".join(detected_labels)
         )
 
-    scored: list[tuple[int, list[str], pd.Series]] = []
-    closest: list[tuple[int, list[str], pd.Series]] = []
+    scored: list[tuple[int, list[str], list[dict[str, object]], pd.Series]] = []
+    closest: list[tuple[int, list[str], list[dict[str, object]], pd.Series]] = []
     for _, listing in listings.iterrows():
-        score, reasons = score_listing(
+        score, reasons, breakdown = score_listing(
             listing,
             effective_max_price,
             effective_districts,
@@ -614,7 +638,7 @@ def main() -> None:
             effective_near_metro,
             requested_features,
         )
-        candidate = (score, reasons, listing)
+        candidate = (score, reasons, breakdown, listing)
         closest.append(candidate)
         if listing_matches_required_criteria(
             listing,
@@ -643,8 +667,8 @@ def main() -> None:
         st.warning("Tüm zorunlu kriterleri aynı anda karşılayan ilan yok; en yakın alternatifler gösteriliyor.")
     if not top_matches:
         st.warning("Bu kriterlerin tamamına uyan aktif ilan bulunamadı.")
-    selected_matches: list[tuple[int, list[str], pd.Series]] = []
-    for score, reasons, listing in top_matches:
+    selected_matches: list[tuple[int, list[str], list[dict[str, object]], pd.Series]] = []
+    for score, reasons, breakdown, listing in top_matches:
         with st.container(border=True):
             image_column, detail_column, action_column = st.columns([1.15, 2.4, 0.8])
             with image_column:
@@ -701,6 +725,17 @@ def main() -> None:
                     st.markdown(f"**Site olanakları:** {listing.get('amenities', '-')}")
                     st.markdown(f"**Yakın çevre:** {listing.get('nearby_places', '-')}")
                     st.markdown(f"**Teknik donanım:** {listing.get('technical_details', '-')}")
+                with st.expander("Eşleşme hesabı"):
+                    for criterion in breakdown:
+                        ratio = float(criterion["earned"]) / float(criterion["possible"])
+                        st.progress(
+                            ratio,
+                            text=(
+                                f"{criterion['label']}: "
+                                f"{criterion['earned']:.0f}/{criterion['possible']} puan · "
+                                f"{criterion['detail']}"
+                            ),
+                        )
             with action_column:
                 st.markdown(f'<div class="match-score">%{score}</div>', unsafe_allow_html=True)
                 st.caption("eşleşme")
@@ -711,7 +746,7 @@ def main() -> None:
                     key=f"shortlist_{listing['listing_id']}",
                 )
                 if selected:
-                    selected_matches.append((score, reasons, listing))
+                    selected_matches.append((score, reasons, breakdown, listing))
 
     if selected_matches:
         report = build_customer_report(request, selected_matches)
