@@ -27,7 +27,7 @@ def setting(name: str, default: str = "") -> str:
         return default
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=300)
 def load_listings() -> tuple[pd.DataFrame, str]:
     load_dotenv(ENV_FILE, override=True)
     sample_listings = pd.read_csv(LISTINGS_FILE, encoding="utf-8-sig")
@@ -48,6 +48,16 @@ def load_listings() -> tuple[pd.DataFrame, str]:
 
     listings = load_sheet_listings(spreadsheet_id, credentials_source, sample_listings)
     return listings, "Google Sheets"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def analyze_request(
+    api_key: str,
+    request: str,
+    districts: tuple[str, ...],
+    rooms: tuple[str, ...],
+):
+    return parse_customer_request(api_key, request, list(districts), list(rooms))
 
 
 def parse_request(request: str, districts: list[str]) -> dict[str, object]:
@@ -173,60 +183,110 @@ def build_customer_report(
 
 
 def apply_styles() -> None:
+    theme_type = getattr(st.context.theme, "type", "light")
+    if theme_type == "dark":
+        palette = {
+            "bg": "#111714",
+            "surface": "#18221E",
+            "sidebar": "#17211D",
+            "text": "#EDF6F2",
+            "muted": "#A8BBB2",
+            "primary": "#61D0A8",
+            "accent": "#FF9A78",
+            "border": "#34463E",
+            "shadow": "rgba(0, 0, 0, .24)",
+        }
+    else:
+        palette = {
+            "bg": "#F7FAF8",
+            "surface": "#FFFFFF",
+            "sidebar": "#EAF2EE",
+            "text": "#17241F",
+            "muted": "#5B6C64",
+            "primary": "#17735A",
+            "accent": "#D75F3C",
+            "border": "#D4E1DB",
+            "shadow": "rgba(24, 55, 44, .08)",
+        }
     st.markdown(
-        """
+        f"""
         <style>
-        .stApp { background: #f8faf9; color: #16211d; }
-        [data-testid="stHeader"] { background: rgba(248,250,249,.94); }
-        [data-testid="stSidebar"] {
-            background: #edf4f1;
-            border-right: 1px solid #dce7e2;
-        }
-        [data-testid="stVerticalBlockBorderWrapper"] {
-            background: #ffffff;
-            border: 1px solid #dfe7e3;
+        :root {{
+            --app-bg: {palette['bg']};
+            --app-surface: {palette['surface']};
+            --app-sidebar: {palette['sidebar']};
+            --app-text: {palette['text']};
+            --app-muted: {palette['muted']};
+            --app-primary: {palette['primary']};
+            --app-accent: {palette['accent']};
+            --app-border: {palette['border']};
+            --app-shadow: {palette['shadow']};
+        }}
+        .stApp {{
+            background: var(--app-bg);
+            color: var(--app-text);
+        }}
+        [data-testid="stHeader"] {{
+            background: color-mix(in srgb, var(--app-bg) 92%, transparent);
+            border-bottom: 1px solid var(--app-border);
+        }}
+        [data-testid="stSidebar"] {{
+            background: var(--app-sidebar);
+            border-right: 1px solid var(--app-border);
+        }}
+        [data-testid="stVerticalBlockBorderWrapper"] {{
+            background: var(--app-surface);
+            border: 1px solid var(--app-border);
             border-radius: 8px;
-            box-shadow: 0 5px 18px rgba(30, 58, 48, .055);
-        }
-        [data-testid="stMetric"] {
+            box-shadow: 0 7px 22px var(--app-shadow);
+        }}
+        [data-testid="stMetric"] {{
             background: transparent;
-            border-left: 3px solid #f07b55;
+            border-left: 3px solid var(--app-accent);
             padding-left: 12px;
-        }
-        [data-testid="stImage"] img { border-radius: 6px; }
-        .app-kicker { color: #14765b; font-size: 13px; font-weight: 750; }
-        .app-kicker::before {
+        }}
+        [data-testid="stImage"] img {{ border-radius: 6px; }}
+        .app-kicker {{ color: var(--app-primary); font-size: 13px; font-weight: 750; }}
+        .app-kicker::before {{
             content: "";
             display: inline-block;
             width: 8px;
             height: 8px;
             margin-right: 8px;
             border-radius: 50%;
-            background: #f07b55;
-        }
-        .match-score { color: #d95f3b; font-size: 24px; font-weight: 780; }
-        .listing-meta { color: #596761; font-size: 14px; }
-        .reason-tag {
+            background: var(--app-accent);
+        }}
+        .match-score {{
+            color: var(--app-accent);
+            font-size: 24px;
+            font-weight: 780;
+        }}
+        .listing-meta {{
+            color: var(--app-muted);
+            font-size: 14px;
+        }}
+        .reason-tag {{
             display: inline-block;
             margin: 8px 5px 0 0;
             padding: 4px 7px;
-            border: 1px solid #d7e5df;
+            border: 1px solid var(--app-border);
             border-radius: 4px;
-            background: #f2f7f5;
-            color: #315d50;
+            background: color-mix(in srgb, var(--app-primary) 14%, var(--app-surface));
+            color: var(--app-text);
             font-size: 12px;
-        }
+        }}
         .stButton > button, .stLinkButton > a,
-        [data-testid="stFormSubmitButton"] > button {
+        [data-testid="stFormSubmitButton"] > button {{
             min-height: 42px;
             border-radius: 6px;
             font-weight: 700;
-        }
-        [data-testid="stForm"] { border-color: #d8e4df; }
-        h1, h2, h3, p, button, label { letter-spacing: 0 !important; }
-        h1 { font-size: 32px !important; }
-        h2 { font-size: 22px !important; }
-        h3 { font-size: 18px !important; }
+        }}
+        [data-testid="stForm"] {{ border-color: var(--app-border); }}
+        [data-testid="stAlert"] {{ border: 1px solid var(--app-border); }}
+        h1, h2, h3, p, button, label {{ letter-spacing: 0 !important; }}
+        h1 {{ font-size: 32px !important; }}
+        h2 {{ font-size: 22px !important; }}
+        h3 {{ font-size: 18px !important; }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -275,35 +335,47 @@ def main() -> None:
             placeholder="Başakşehir'de site içinde, balkonlu, 3+1 ve 8 milyon TL altı daire arıyorum.",
             height=92,
         )
+        detailed_ai = st.toggle("AI ile detaylı analiz", value=True)
         search_clicked = st.form_submit_button(
             "Uygun ilanları bul",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
     load_dotenv(ENV_FILE, override=True)
     gemini_enabled = setting("ENABLE_GEMINI", "false").lower() == "true"
     gemini_key = setting("GEMINI_API_KEY")
     if search_clicked and request:
-        if gemini_enabled and gemini_key:
+        if detailed_ai and gemini_enabled and gemini_key:
             try:
-                with st.spinner(f"Talep Gemini ile analiz ediliyor ({GEMINI_MODEL})..."):
-                    ai_criteria = parse_customer_request(gemini_key, request, districts, rooms)
+                with st.spinner(f"Talep analiz ediliyor ({GEMINI_MODEL})..."):
+                    ai_criteria = analyze_request(
+                        gemini_key,
+                        request,
+                        tuple(districts),
+                        tuple(rooms),
+                    )
                 parsed = ai_criteria.model_dump(exclude_none=True)
                 st.session_state["criteria_source"] = "Gemini"
+                st.session_state["search_notice"] = "Talep Gemini ile analiz edildi ve ilanlar yeniden sıralandı."
             except Exception as error:
                 st.warning(f"AI analizi kullanılamadı, yerel analiz uygulandı: {error}")
                 parsed = parse_request(request, districts)
                 st.session_state["criteria_source"] = "Yerel"
+                st.session_state["search_notice"] = "Talep hızlı arama ile analiz edildi ve ilanlar yeniden sıralandı."
         else:
             parsed = parse_request(request, districts)
             st.session_state["criteria_source"] = "Yerel"
+            st.session_state["search_notice"] = "Talep hızlı arama ile analiz edildi ve ilanlar yeniden sıralandı."
         st.session_state["parsed_criteria"] = parsed
         st.session_state["parsed_request"] = request
     elif st.session_state.get("parsed_request") == request:
         parsed = st.session_state.get("parsed_criteria", {})
     else:
         parsed = parse_request(request, districts)
+
+    if request and st.session_state.get("parsed_request") == request:
+        st.success(st.session_state.get("search_notice", "İlanlar yeniden sıralandı."))
 
     parsed_districts = parsed.get("district", [])
     if isinstance(parsed_districts, str):
@@ -373,7 +445,7 @@ def main() -> None:
         balcony = st.checkbox("Balkon", value=bool(parsed.get("balcony")))
         in_complex = st.checkbox("Site içinde", value=bool(parsed.get("in_complex")))
         near_metro = st.checkbox("Metroya yakın", value=bool(parsed.get("near_metro")))
-        result_limit = st.slider("Gösterilecek ilan", 5, 30, 12, 1)
+        result_limit = st.slider("Gösterilecek ilan", 5, 30, 8, 1)
 
     effective_max_price = int(parsed.get("max_price", max_price))
     effective_districts = default_districts or selected_districts
@@ -429,7 +501,7 @@ def main() -> None:
                 image_source = str(listing["image_url"])
                 if not image_source.lower().startswith(("http://", "https://")):
                     image_source = str(APP_DIR / image_source)
-                st.image(image_source, use_container_width=True)
+                st.image(image_source, width="stretch")
             with detail_column:
                 st.markdown(f"### {listing['title']}")
                 st.markdown(
@@ -452,7 +524,7 @@ def main() -> None:
                 st.markdown(f'<div class="match-score">%{score}</div>', unsafe_allow_html=True)
                 st.caption("eşleşme")
                 st.markdown(f"**{format_price(int(listing['price']))}**")
-                st.link_button("İlanı aç", listing["listing_url"], use_container_width=True)
+                st.link_button("İlanı aç", listing["listing_url"], width="stretch")
                 selected = st.checkbox(
                     "Kısa liste",
                     key=f"shortlist_{listing['listing_id']}",
@@ -468,7 +540,7 @@ def main() -> None:
             data=report.encode("utf-8-sig"),
             file_name="musteri_ilan_onerileri.txt",
             mime="text/plain",
-            use_container_width=True,
+            width="stretch",
         )
 
     st.caption(f"Mod: {mode}. Eşleşme puanı öneridir; nihai değerlendirme emlak danışmanına aittir.")

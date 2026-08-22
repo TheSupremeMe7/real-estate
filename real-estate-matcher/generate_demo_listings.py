@@ -25,13 +25,13 @@ LOCATIONS = [
 ]
 
 TYPES = [
-    ("Daire", ["1+1", "2+1", "3+1", "4+1"], "assets/city-apartment.png"),
-    ("Bahçe Katı", ["2+1", "3+1", "4+1"], "assets/garden-flat.png"),
-    ("Villa", ["4+1", "5+1", "6+2", "7+2"], "assets/villa-garden.png"),
-    ("Dubleks", ["3+1", "4+1", "5+1"], "assets/penthouse-terrace.png"),
-    ("Rezidans", ["1+0", "1+1", "2+1", "3+1"], "assets/smart-studio.png"),
-    ("Müstakil Ev", ["2+1", "3+1", "4+1", "5+2"], "assets/villa-garden.png"),
-    ("Çatı Katı", ["2+1", "3+1", "4+1"], "assets/penthouse-terrace.png"),
+    ("Daire", ["1+1", "2+1", "3+1", "4+1"], "assets/city-apartment-thumb.webp"),
+    ("Bahçe Katı", ["2+1", "3+1", "4+1"], "assets/garden-flat-thumb.webp"),
+    ("Villa", ["4+1", "5+1", "6+2", "7+2"], "assets/villa-garden-thumb.webp"),
+    ("Dubleks", ["3+1", "4+1", "5+1"], "assets/penthouse-terrace-thumb.webp"),
+    ("Rezidans", ["1+0", "1+1", "2+1", "3+1"], "assets/smart-studio-thumb.webp"),
+    ("Müstakil Ev", ["2+1", "3+1", "4+1", "5+2"], "assets/villa-garden-thumb.webp"),
+    ("Çatı Katı", ["2+1", "3+1", "4+1"], "assets/penthouse-terrace-thumb.webp"),
 ]
 
 HIGHLIGHTS = [
@@ -102,7 +102,7 @@ def make_listings(count: int = 100) -> pd.DataFrame:
                 "description": f"{neighborhood} merkezine yakın, iyi planlanmış {gross_m2} m² yaşam alanı. {highlight}.",
                 "highlight": highlight,
                 "listing_url": f"https://example.com/ilan/ILN-{index + 1:03d}",
-                "image_url": image if index % 6 else "assets/family-complex.png",
+                "image_url": image if index % 6 else "assets/family-complex-thumb.webp",
                 "status": "active",
             }
         )
@@ -111,5 +111,5 @@ def make_listings(count: int = 100) -> pd.DataFrame:
 
 if __name__ == "__main__":
     listings = make_listings()
-    listings.to_csv(OUTPUT, index=False, encoding="utf-8-sig")
+    listings.to_csv(OUTPUT, index=False, encoding="utf-8-sig", lineterminator="\n")
     print(f"{len(listings)} ilan yazıldı: {OUTPUT}")
