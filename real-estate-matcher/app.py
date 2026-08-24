@@ -3,6 +3,8 @@
 import sys
 import time
 import re
+import json
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -32,6 +34,7 @@ from matcher import (
 
 
 DATA_FILE = Path(__file__).parent / "data" / "listings.csv"
+CUSTOMERS_FILE = Path(__file__).parent / "data" / "customers.json"
 REQUIRED_COLUMNS = {
     "listing_id",
     "title",
@@ -63,6 +66,13 @@ BOOLEAN_FILTER_OPTIONS = {
     "Hayır": "false",
     "Bilinmiyor": "unknown",
 }
+
+CRITERION_MODE_OPTIONS = {
+    "Zorunlu": "hard",
+    "Tercih": "preference",
+    "Önemsiz": "ignore",
+}
+CRITERION_MODE_LABELS = {value: key for key, value in CRITERION_MODE_OPTIONS.items()}
 
 SAMPLE_PERSONAS = {
     "👨‍👩‍👧 Aile Evi (Kayaşehir 3+1)": (
@@ -327,6 +337,8 @@ def render_criteria_summary(criteria_data: dict) -> None:
         items.append(("İstenen özellik", feature.title()))
     for feature in criteria_data.get("excluded_features", []):
         items.append(("İstenmeyen özellik", feature.title()))
+    for feature in criteria_data.get("unverified_preferences", []):
+        items.append(("Doğrulanamayan tercih", feature.title()))
 
     if not items:
         st.info("Metinden puanlanabilir bir emlak kriteri çıkarılamadı.")
@@ -334,6 +346,118 @@ def render_criteria_summary(criteria_data: dict) -> None:
     columns = st.columns(min(3, len(items)))
     for index, (label, value) in enumerate(items):
         columns[index % len(columns)].metric(label, value)
+
+
+def criterion_display_label(key: str) -> str:
+    labels = {
+        "location": "Konum",
+        "property_type": "Gayrimenkul türü",
+        "transaction_type": "İlan türü",
+        "room_count": "Oda sayısı",
+        "budget": "Bütçe",
+        "area": "Minimum alan",
+        "in_complex": "Site içinde",
+        "balcony": "Balkon",
+        "furnished": "Eşyalı",
+        "near_metro": "Metro yakınlığı",
+    }
+    if key.startswith("feature:"):
+        return key.split(":", 1)[1].title()
+    if key.startswith("exclude:"):
+        return f"Olmamalı: {key.split(':', 1)[1]}"
+    return labels.get(key, key.replace("_", " ").title())
+
+
+def refresh_ai_matches(listings: pd.DataFrame) -> None:
+    criteria = st.session_state.get("parsed_criteria_obj")
+    if criteria is None:
+        return
+    st.session_state["parsed_criteria"] = criteria.model_dump(mode="json")
+    st.session_state["ai_matches"] = match_listings(listings, criteria)
+    st.session_state["near_matches"] = find_near_matches(listings, criteria)
+
+
+def render_nearby_places(value: object) -> None:
+    places = [item.strip() for item in str(value or "").split(";") if item.strip()]
+    if not places:
+        st.caption("Yakın çevre bilgisi bulunmuyor.")
+        return
+    columns = st.columns(min(4, len(places)))
+    icons = ("🚇", "🏫", "🛒", "🏥", "🌳", "📍")
+    for index, place in enumerate(places):
+        with columns[index % len(columns)]:
+            st.markdown(f"{icons[index % len(icons)]} **{place}**")
+
+
+def load_customers() -> list[dict]:
+    if not CUSTOMERS_FILE.exists():
+        return []
+    try:
+        payload = json.loads(CUSTOMERS_FILE.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_customers(customers: list[dict]) -> None:
+    CUSTOMERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary_file = CUSTOMERS_FILE.with_suffix(".tmp")
+    temporary_file.write_text(
+        json.dumps(customers, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_file.replace(CUSTOMERS_FILE)
+
+
+def create_customer(name: str, phone: str, notes: str) -> str:
+    customers = st.session_state.setdefault("customers", [])
+    next_number = max(
+        [int(item.get("customer_id", "MUS-000").split("-")[-1]) for item in customers]
+        or [0]
+    ) + 1
+    customer_id = f"MUS-{next_number:03d}"
+    customers.append(
+        {
+            "customer_id": customer_id,
+            "name": name.strip(),
+            "phone": phone.strip(),
+            "notes": notes.strip(),
+            "status": "Aktif arayış",
+            "created_at": datetime.now().isoformat(timespec="minutes"),
+            "history": [],
+        }
+    )
+    save_customers(customers)
+    st.session_state["active_customer_id"] = customer_id
+    st.session_state["pending_customer_selector"] = customer_id
+    return customer_id
+
+
+def sync_active_customer() -> None:
+    st.session_state["active_customer_id"] = st.session_state.get("active_customer_selector", "")
+
+
+def record_sent_listings(customer_id: str, listings: list[dict], request_text: str) -> None:
+    for customer in st.session_state.get("customers", []):
+        if customer.get("customer_id") != customer_id:
+            continue
+        customer.setdefault("history", []).append(
+            {
+                "sent_at": datetime.now().isoformat(timespec="minutes"),
+                "request": request_text,
+                "listings": [
+                    {
+                        "listing_id": listing.get("listing_id"),
+                        "title": listing.get("title"),
+                        "match_score": listing.get("match_score"),
+                        "price": listing.get("price"),
+                    }
+                    for listing in listings[:4]
+                ],
+            }
+        )
+        save_customers(st.session_state["customers"])
+        return
 
 
 # --- SAYFA YAPILANDIRMASI VE CSS ---
@@ -442,6 +566,9 @@ st.markdown(
 st.session_state.setdefault("customer_request_input", "")
 st.session_state.setdefault("search_performed", False)
 st.session_state.setdefault("compare_selected", [])
+st.session_state.setdefault("customers", load_customers())
+st.session_state.setdefault("active_customer_id", "")
+st.session_state.setdefault("active_customer_selector", "")
 
 
 # --- YAN PANEL (SIDEBAR) ---
@@ -466,19 +593,69 @@ with st.sidebar:
             st.session_state["custom_api_key"] = api_key_input
         st.session_state["custom_model"] = model_choice
 
-    # Portföy Durum Özeti
     listings_data = get_listings_df()
     active_df = listings_data[
         listings_data["status"].fillna("").astype(str).str.lower().eq("active")
     ]
 
     st.divider()
-    st.subheader("📊 Portföy Özeti")
-    col_sb1, col_sb2 = st.columns(2)
-    col_sb1.metric("Aktif İlan", len(active_df))
-    sidebar_sale_count = active_df["transaction_type"].eq("Satılık").sum()
-    sidebar_rent_count = active_df["transaction_type"].eq("Kiralık").sum()
-    col_sb2.metric("Satılık / Kiralık", f"{sidebar_sale_count} / {sidebar_rent_count}")
+    st.subheader("👤 Müşteri Profili")
+    customer_lookup = {
+        item["customer_id"]: item for item in st.session_state["customers"]
+    }
+    customer_ids = ["", *customer_lookup.keys()]
+    pending_customer_id = st.session_state.pop("pending_customer_selector", "")
+    if pending_customer_id in customer_ids:
+        st.session_state["active_customer_selector"] = pending_customer_id
+    if st.session_state["active_customer_id"] not in customer_ids:
+        st.session_state["active_customer_id"] = ""
+    if st.session_state["active_customer_selector"] not in customer_ids:
+        st.session_state["active_customer_selector"] = ""
+    st.selectbox(
+        "Aktif müşteri",
+        customer_ids,
+        key="active_customer_selector",
+        on_change=sync_active_customer,
+        format_func=lambda customer_id: (
+            "Müşterisiz arama"
+            if not customer_id
+            else f"{customer_lookup[customer_id]['name']} ({customer_id})"
+        ),
+    )
+    active_customer = customer_lookup.get(st.session_state["active_customer_id"])
+    if active_customer:
+        st.caption(
+            f"{active_customer.get('status', 'Aktif')} · "
+            f"{len(active_customer.get('history', []))} gönderim kaydı"
+        )
+        if active_customer.get("notes"):
+            st.caption(active_customer["notes"])
+        if active_customer.get("history"):
+            with st.expander("Gönderilen ilan geçmişi", expanded=False):
+                for history_item in reversed(active_customer["history"][-5:]):
+                    st.write(f"**{history_item.get('sent_at', '-')}**")
+                    if history_item.get("request"):
+                        st.caption(history_item["request"])
+                    for sent_listing in history_item.get("listings", []):
+                        st.write(
+                            f"{sent_listing.get('listing_id', '-')} · "
+                            f"%{sent_listing.get('match_score', 0)} · "
+                            f"{sent_listing.get('title', '')}"
+                        )
+                    st.divider()
+
+    with st.expander("Yeni müşteri ekle", expanded=False):
+        with st.form("new_customer_form", clear_on_submit=True):
+            new_customer_name = st.text_input("Ad soyad")
+            new_customer_phone = st.text_input("Telefon")
+            new_customer_notes = st.text_area("Görüşme notu", height=70)
+            customer_submit = st.form_submit_button("Müşteriyi kaydet", width="stretch")
+        if customer_submit:
+            if len(new_customer_name.strip()) < 2:
+                st.warning("Müşteri adını yazın.")
+            else:
+                create_customer(new_customer_name, new_customer_phone, new_customer_notes)
+                st.rerun()
 
     st.divider()
     st.subheader("⚡ Hızlı Müşteri Senaryoları")
@@ -501,7 +678,8 @@ sale_prices = pd.to_numeric(sale_df.get("price"), errors="coerce").dropna()
 rent_prices = pd.to_numeric(rent_df.get("price"), errors="coerce").dropna()
 roi_values = pd.to_numeric(sale_df.get("roi_years"), errors="coerce").dropna()
 
-st.title("Emlak Zekası & Portföy Eşleştirme Portalı")
+st.title("Portföy Zekası")
+st.caption("AI destekli gayrimenkul eşleştirme ve danışman çalışma alanı")
 sale_average_text = f"{sale_prices.mean() / 1_000_000:.1f} Mn TL" if not sale_prices.empty else "Veri yok"
 rent_average_text = f"{rent_prices.mean():,.0f} TL".replace(",", ".") if not rent_prices.empty else "Veri yok"
 roi_average_text = f"{roi_values.mean():.1f} yıl" if not roi_values.empty else "Veri yok"
@@ -579,6 +757,11 @@ with tab_ai:
                     parsed_data = parsed.model_dump(mode="json")
                     st.session_state["parsed_criteria"] = parsed_data
                     st.session_state["parsed_criteria_obj"] = parsed
+                    for session_key in list(st.session_state):
+                        if str(session_key).startswith("criterion_mode_"):
+                            del st.session_state[session_key]
+                    for criterion_key, criterion_mode_value in parsed.criterion_modes.items():
+                        st.session_state[f"criterion_mode_{criterion_key}"] = CRITERION_MODE_LABELS[criterion_mode_value]
                     if count_detected_criteria(parsed_data) == 0:
                         st.session_state["ai_matches"] = []
                         st.session_state["near_matches"] = []
@@ -611,6 +794,34 @@ with tab_ai:
         criteria_data = st.session_state["parsed_criteria"]
         with st.expander("📋 AI Tarafından Algılanan Kriter Özeti", expanded=False):
             render_criteria_summary(criteria_data)
+            criteria_object = st.session_state.get("parsed_criteria_obj")
+            if criteria_object and criteria_object.criterion_modes:
+                st.markdown("**Kriter önceliklerini doğrulayın**")
+                st.caption("Zorunlu kriterler tam eşleşme listesini filtreler; tercihler puanı etkiler.")
+                mode_fields = []
+                with st.form("criterion_priority_form"):
+                    mode_columns = st.columns(2)
+                    for criterion_index, criterion_key in enumerate(criteria_object.criterion_modes):
+                        widget_key = f"criterion_mode_{criterion_key}"
+                        with mode_columns[criterion_index % 2]:
+                            st.selectbox(
+                                criterion_display_label(criterion_key),
+                                list(CRITERION_MODE_OPTIONS),
+                                key=widget_key,
+                            )
+                        mode_fields.append((criterion_key, widget_key))
+                    priority_submit = st.form_submit_button(
+                        "Öncelikleri uygula ve yeniden eşleştir",
+                        type="primary",
+                        width="stretch",
+                    )
+                if priority_submit:
+                    criteria_object.criterion_modes = {
+                        criterion_key: CRITERION_MODE_OPTIONS[st.session_state[widget_key]]
+                        for criterion_key, widget_key in mode_fields
+                    }
+                    refresh_ai_matches(active_df)
+                    st.rerun()
             with st.expander("Teknik kriter verisini göster", expanded=False):
                 st.json(criteria_data)
 
@@ -635,12 +846,16 @@ with tab_ai:
 
             for idx, listing in enumerate(matches[:limit_count]):
                 score = listing.get("match_score", 0)
-                if score >= 85:
-                    badge_html = f"<span class='score-badge-high'>%{score} Mükemmel Uyum</span>"
+                if score >= 90:
+                    badge_html = f"<span class='score-badge-high'>%{score} Çok Yüksek Uyum</span>"
+                elif score >= 80:
+                    badge_html = f"<span class='score-badge-med'>%{score} Güçlü Uyum</span>"
                 elif score >= 70:
-                    badge_html = f"<span class='score-badge-med'>%{score} Güçlü Eşleşme</span>"
-                else:
+                    badge_html = f"<span class='score-badge-med'>%{score} İyi Alternatif</span>"
+                elif score >= 60:
                     badge_html = f"<span class='score-badge-low'>%{score} Kısmi Uyum</span>"
+                else:
+                    badge_html = f"<span class='score-badge-low'>%{score} Düşük Uyum</span>"
 
                 price_num = float(listing["price"])
                 price_str = f"{price_num:,.0f} TL".replace(",", ".")
@@ -677,20 +892,44 @@ with tab_ai:
                         tags_html.append("<span class='pill-tag'>🪴 Balkonlu</span>")
                     if normalize_boolean(listing.get("furnished")) is True:
                         tags_html.append("<span class='pill-tag'>🛋️ Eşyalı</span>")
-                    if listing.get("transport_notes"):
-                        tags_html.append(f"<span class='pill-tag'>🚇 {listing['transport_notes']}</span>")
-
                     if tags_html:
                         st.markdown("".join(tags_html), unsafe_allow_html=True)
 
-                    st.markdown("**✨ Neden Bu İlan Uygun?**")
-                    for reason in listing.get("match_reasons", []):
-                        st.write(f"✓ {reason}")
+                    earned_points = listing.get("match_points_earned", 0)
+                    possible_points = listing.get("match_points_possible", 0)
+                    st.caption(
+                        f"Normalize hesap: {earned_points:g} / {possible_points:g} ağırlıklı puan = %{score} müşteri uyumu"
+                    )
+                    matched_criteria = listing.get("matched_criteria", [])
+                    st.markdown("**Karşılanan başlıca kriterler**")
+                    for item in matched_criteria[:4]:
+                        st.write(
+                            f"✓ **{item['label']}** · {item['detail']} "
+                            f"(+{item['points']:g}/{item['max_points']:g})"
+                        )
 
-                    missing = listing.get("missing_information", [])
-                    if missing:
-                        for m_info in missing:
-                            st.caption(f"⚠️ Bilgi: {m_info}")
+                    with st.expander(
+                        f"Tüm {len(listing.get('match_breakdown', []))} kriterin puan dökümünü göster",
+                        expanded=False,
+                    ):
+                        breakdown_columns = st.columns(2)
+                        status_groups = (
+                            ("✓ Karşılanan", listing.get("matched_criteria", []), 0),
+                            ("~ Kısmen karşılanan", listing.get("partial_criteria", []), 1),
+                            ("✗ Karşılanmayan", listing.get("unmatched_criteria", []), 0),
+                            ("? Doğrulanamayan", listing.get("unknown_criteria", []), 1),
+                        )
+                        for section_title, section_items, column_index in status_groups:
+                            if not section_items:
+                                continue
+                            with breakdown_columns[column_index]:
+                                st.markdown(f"**{section_title}**")
+                                for item in section_items:
+                                    point_text = (
+                                        f"{item['points']:g}/{item['max_points']:g} puan"
+                                        if item["max_points"] > 0 else "puan dışı"
+                                    )
+                                    st.write(f"**{item['label']}** · {item['detail']} · {point_text}")
 
                     with st.expander("Tüm ilan ayrıntıları ve 10 maddelik bina özellikleri", expanded=False):
                         detail_left, detail_right = st.columns(2)
@@ -704,7 +943,8 @@ with tab_ai:
                             st.write(f"**Öne çıkan avantaj:** {listing.get('highlight', '-')}")
                             st.write(f"**Artılar:** {listing.get('pros', '-')}")
                             st.write(f"**Dikkat noktaları:** {listing.get('cons', '-')}")
-                            st.write(f"**Yakın çevre:** {listing.get('transport_notes', '-')}")
+                        st.markdown("**Yakın çevre**")
+                        render_nearby_places(listing.get("transport_notes"))
                         st.markdown("**Bina özellikleri**")
                         st.text(str(listing.get("building_features") or "Bilgi bulunmuyor"))
 
@@ -730,13 +970,12 @@ with tab_ai:
         if near_matches:
             with st.expander(f"💡 Akıllı Esnetme & Alternatif Fırsatlar ({len(near_matches)} İlan)", expanded=False):
                 st.info(
-                    "Müşterinizin bütçesini hafifçe (%5-15) esnettiğinizde veya alternatif lokasyonlarda "
-                    "kaçırılmaması gereken şu fırsatlar bulunuyor:"
+                    "Bu ilanlar en fazla iki zorunlu kriteri kaçırıyor. Her alternatifin neden sunulduğu aşağıda açıkça belirtilir."
                 )
                 for near in near_matches:
                     with st.container(border=True):
                         n_price = float(near["price"])
-                        st.write(f"**{near['title']}** — **{n_price:,.0f} TL** ({near['room_count']}, {near['net_m2']} m²)".replace(",", "."))
+                        st.write(f"**%{near['match_score']} uyum · {near['title']}** — **{n_price:,.0f} TL** ({near['room_count']}, {near['net_m2']} m²)".replace(",", "."))
                         for note in near.get("relaxation_notes", []):
                             st.markdown(f"🔸 *{note}*")
                         if near.get("match_reasons"):
@@ -748,24 +987,58 @@ with tab_ai:
             st.subheader("📲 Müşteri WhatsApp Sunum Oluşturucu")
             st.write("Eşleşen en iyi ilanları tek tıkla müşterinize gönderebileceğiniz şık bir WhatsApp mesajına dönüştürün.")
 
-            col_w1, col_w2, col_w3 = st.columns([2, 2, 2])
+            active_customer_record = next(
+                (
+                    customer for customer in st.session_state.get("customers", [])
+                    if customer.get("customer_id") == st.session_state.get("active_customer_id")
+                ),
+                None,
+            )
+            col_w1, col_w2, col_w3, col_w4 = st.columns(4)
             with col_w1:
-                client_name_in = st.text_input("Müşteri Adı / Hitap", value="Ahmet Bey")
+                client_name_in = st.text_input(
+                    "Müşteri Adı / Hitap",
+                    value=active_customer_record.get("name", "") if active_customer_record else "",
+                )
             with col_w2:
                 consultant_name_in = st.text_input("Danışman Adınız", value="Emlak Danışmanınız")
             with col_w3:
-                client_phone_in = st.text_input("Müşteri Telefon No (Opsiyonel)", placeholder="905xxxxxxxxx")
+                client_phone_in = st.text_input(
+                    "Müşteri Telefonu",
+                    value=active_customer_record.get("phone", "") if active_customer_record else "",
+                    placeholder="905xxxxxxxxx",
+                )
+            with col_w4:
+                consultant_phone_in = st.text_input("Danışman Telefonu", placeholder="05xxxxxxxxx")
 
             pitch_text = generate_client_pitch(
                 matches,
                 client_name=client_name_in or "Değerli Müşterimiz",
                 consultant_name=consultant_name_in or "Emlak Danışmanınız",
+                consultant_phone=consultant_phone_in,
             )
 
             st.text_area("Hazırlanan WhatsApp Mesajı", value=pitch_text, height=220)
 
             wa_url = get_whatsapp_share_url(pitch_text, client_phone_in)
-            st.link_button("💬 WhatsApp ile Hemen Gönder", wa_url, type="primary", width="stretch")
+            whatsapp_col, history_col = st.columns(2)
+            with whatsapp_col:
+                st.link_button("💬 WhatsApp ile Hemen Gönder", wa_url, type="primary", width="stretch")
+            with history_col:
+                history_clicked = st.button(
+                    "Gönderimi müşteri geçmişine kaydet",
+                    width="stretch",
+                    disabled=active_customer_record is None,
+                )
+            if history_clicked and active_customer_record:
+                record_sent_listings(
+                    active_customer_record["customer_id"],
+                    matches,
+                    st.session_state.get("customer_request_input", ""),
+                )
+                st.success("Seçilen ilanlar müşteri geçmişine kaydedildi.")
+            elif active_customer_record is None:
+                st.caption("Gönderim geçmişi için sol menüden bir müşteri seçin veya yeni müşteri oluşturun.")
 
 
 # ==========================================
@@ -993,11 +1266,34 @@ with tab_analytics:
     analytics_df["net_m2_num"] = pd.to_numeric(analytics_df["net_m2"], errors="coerce")
     analytics_df = analytics_df.dropna(subset=["price_num"])
 
+    filter_a, filter_b, filter_c, filter_d, filter_e = st.columns(5)
+    with filter_a:
+        analytics_city = st.selectbox("Şehir", ["Tümü", *optional_values(analytics_df, "city")], key="analytics_city")
+    district_source = analytics_df if analytics_city == "Tümü" else analytics_df[analytics_df["city"].eq(analytics_city)]
+    with filter_b:
+        analytics_district = st.selectbox("İlçe", ["Tümü", *optional_values(district_source, "district")], key="analytics_district")
+    with filter_c:
+        analytics_property = st.selectbox("Gayrimenkul", ["Tümü", *optional_values(analytics_df, "property_type")], key="analytics_property")
+    with filter_d:
+        analytics_room = st.selectbox("Oda", ["Tümü", *optional_values(analytics_df, "room_count")], key="analytics_room")
+    with filter_e:
+        analytics_limit = st.selectbox("Grafik kapsamı", ["İlk 10", "İlk 20"], key="analytics_limit")
+
+    for column, selected in (
+        ("city", analytics_city),
+        ("district", analytics_district),
+        ("property_type", analytics_property),
+        ("room_count", analytics_room),
+    ):
+        if selected != "Tümü":
+            analytics_df = analytics_df[analytics_df[column].eq(selected)]
+
     if analytics_df.empty:
         st.info("Analiz üretmek için geçerli fiyatı olan aktif ilan bulunmuyor.")
     else:
         analytics_sale = analytics_df[analytics_df["transaction_type"].eq("Satılık")].copy()
         analytics_rent = analytics_df[analytics_df["transaction_type"].eq("Kiralık")].copy()
+        chart_limit = 10 if analytics_limit == "İlk 10" else 20
 
         metric_a, metric_b, metric_c, metric_d = st.columns(4)
         metric_a.metric("Medyan satış", f"{analytics_sale['price_num'].median() / 1_000_000:.1f} Mn TL" if not analytics_sale.empty else "Veri yok")
@@ -1007,20 +1303,19 @@ with tab_analytics:
 
         col_g1, col_g2 = st.columns(2)
         with col_g1:
-            st.write("**Mahalle bazında medyan satılık fiyatı**")
-            sale_neighborhood = (
-                analytics_sale.groupby("neighborhood")["price_num"].median().sort_values(ascending=False)
-                if not analytics_sale.empty else pd.Series(dtype=float)
-            )
+            st.write(f"**En yüksek medyan m² satış fiyatına sahip {chart_limit} mahalle**")
+            valid_sale = analytics_sale[analytics_sale["net_m2_num"].gt(0)].copy()
+            valid_sale["m2_price"] = valid_sale["price_num"] / valid_sale["net_m2_num"]
+            sale_neighborhood = valid_sale.groupby("neighborhood")["m2_price"].median().nlargest(chart_limit)
             if sale_neighborhood.empty:
                 st.info("Satılık fiyat grafiği için veri yok.")
             else:
                 st.bar_chart(sale_neighborhood)
 
         with col_g2:
-            st.write("**Mahalle bazında medyan kira**")
+            st.write(f"**En yüksek medyan kiraya sahip {chart_limit} mahalle**")
             rent_neighborhood = (
-                analytics_rent.groupby("neighborhood")["price_num"].median().sort_values(ascending=False)
+                analytics_rent.groupby("neighborhood")["price_num"].median().nlargest(chart_limit)
                 if not analytics_rent.empty else pd.Series(dtype=float)
             )
             if rent_neighborhood.empty:

@@ -4,3 +4,6 @@ __pycache__/
 *.py[cod]
 credentials*.json
 .streamlit/secrets.toml
+real-estate-matcher/data/customers.json
+real-estate-matcher/data/customers.tmp
+artifacts/

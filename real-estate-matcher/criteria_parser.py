@@ -110,8 +110,13 @@ class CustomerCriteria(BaseModel):
         default_factory=list,
         description="Müşterinin açıkça istemediği özellikler.",
     )
+    unverified_preferences: list[str] = Field(
+        default_factory=list,
+        description="Ölçülebilir portföy verisi olmadığı için puanlanmayan öznel tercihler.",
+    )
     sources: CriteriaSources = Field(default_factory=CriteriaSources)
     analysis_method: str = Field(default="Kural motoru", exclude=True)
+    criterion_modes: dict[str, str] = Field(default_factory=dict, exclude=True)
 
 
 class CriteriaParserError(RuntimeError):
@@ -138,6 +143,8 @@ Kurallar:
 - Manzara, otopark, asansör, akıllı ev, elektrikli araç şarjı, havuz, güvenlik,
   ebeveyn banyosu, iskan, kredi uygunluğu ve benzeri açık istekleri desired_features listesine kısa Türkçe ifadelerle ekle.
 - Müşteri bir özelliği istemediğini söylüyorsa excluded_features listesine ekle.
+- Ferah, aydınlık, sakin, prestijli, lüks, modern ve masrafsız gibi öznel
+  ifadeleri desired_features yerine unverified_preferences listesine ekle.
 - Müşterinin metnindeki kişisel bilgileri çıktıya alma.
 
 Kesin sınıflandırma örneği:
@@ -217,10 +224,110 @@ FEATURE_PATTERNS = {
     "eşyalı": ("eşyalı", "esyali", "mobilyalı", "mobilyali"),
 }
 
+SUBJECTIVE_PREFERENCES = {
+    "ferah": ("ferah", "geniş hissettiren", "genis hissettiren"),
+    "aydınlık": ("aydınlık", "aydinlik", "güneş alan", "gunes alan"),
+    "sakin": ("sakin", "sessiz"),
+    "lüks": ("lüks", "luks", "prestijli"),
+    "modern": ("modern",),
+    "masrafsız": ("masrafsız", "masrafsiz", "tadilatsız", "tadilatsiz"),
+}
+
 
 def _search_text(value: str) -> str:
     translation = str.maketrans("çğıöşü", "cgiosu")
     return value.lower().translate(translation)
+
+
+def finalize_criteria(criteria: CustomerCriteria, customer_request: str) -> CustomerCriteria:
+    """AI/kural çıktısını tekilleştirir ve kullanıcıya düzenlenebilir öncelikler ekler."""
+    searchable_text = _search_text(customer_request)
+    transaction_words = (
+        "satilik", "satin al", "kiralik", "kiralamak", "kiraya"
+    )
+    if not any(word in searchable_text for word in transaction_words):
+        criteria.transaction_type = None
+        criteria.sources.transaction_type = SourceStatus.UNKNOWN
+    desired = list(dict.fromkeys(criteria.desired_features))
+    excluded = list(dict.fromkeys(criteria.excluded_features))
+    unverified = list(dict.fromkeys(criteria.unverified_preferences))
+
+    structured_aliases = {
+        "balcony": {"balkon", "balkonlu"},
+        "furnished": {"eşyalı", "esyali", "mobilyalı", "mobilyali"},
+        "near_metro": {"metro", "metroya yakın", "raylı sistem", "istasyon"},
+    }
+    flags = {
+        "balcony": criteria.hard_requirements.balcony if criteria.hard_requirements.balcony is not None else criteria.soft_preferences.balcony,
+        "furnished": criteria.hard_requirements.furnished if criteria.hard_requirements.furnished is not None else criteria.soft_preferences.furnished,
+        "near_metro": criteria.hard_requirements.near_metro if criteria.hard_requirements.near_metro is not None else criteria.soft_preferences.near_metro,
+    }
+    for flag_name, aliases in structured_aliases.items():
+        if flags[flag_name] is not None:
+            desired = [item for item in desired if _search_text(item) not in {_search_text(alias) for alias in aliases}]
+
+    site_requested = (
+        criteria.hard_requirements.in_complex is not None
+        or criteria.soft_preferences.in_complex is not None
+    )
+    if site_requested and any(
+        phrase in searchable_text
+        for phrase in ("guvenlikli site", "guvenlikli bir site", "site icerisinde", "site icinde")
+    ):
+        desired = [item for item in desired if _search_text(item) != "guvenlik"]
+
+    subjective_aliases = {
+        _search_text(alias): canonical
+        for canonical, aliases in SUBJECTIVE_PREFERENCES.items()
+        for alias in aliases
+    }
+    cleaned_desired = []
+    for item in desired:
+        normalized = _search_text(item)
+        subjective = next(
+            (canonical for alias, canonical in subjective_aliases.items() if alias in normalized),
+            None,
+        )
+        if subjective:
+            unverified.append(subjective)
+        else:
+            cleaned_desired.append(item)
+    desired = cleaned_desired
+
+    for canonical, aliases in SUBJECTIVE_PREFERENCES.items():
+        if any(_search_text(alias) in searchable_text for alias in aliases):
+            unverified.append(canonical)
+
+    criteria.desired_features = list(dict.fromkeys(desired))
+    criteria.excluded_features = list(dict.fromkeys(excluded))
+    criteria.unverified_preferences = list(dict.fromkeys(unverified))
+
+    modes: dict[str, str] = {}
+    location = criteria.location
+    if location.city or location.district or location.neighborhoods:
+        modes["location"] = "hard"
+    for key, value in (
+        ("property_type", criteria.property_type),
+        ("transaction_type", criteria.transaction_type),
+        ("room_count", criteria.room_count),
+    ):
+        if value:
+            modes[key] = "hard"
+    if criteria.price.minimum is not None or criteria.price.maximum is not None:
+        modes["budget"] = "hard"
+    if criteria.area.minimum_net_m2 is not None or criteria.area.minimum_gross_m2 is not None:
+        modes["area"] = "hard"
+    for key in ("in_complex", "balcony", "furnished", "near_metro"):
+        if getattr(criteria.hard_requirements, key) is not None:
+            modes[key] = "hard"
+        elif getattr(criteria.soft_preferences, key) is not None:
+            modes[key] = "preference"
+    for feature in criteria.desired_features:
+        modes[f"feature:{feature}"] = "preference"
+    for feature in criteria.excluded_features:
+        modes[f"exclude:{feature}"] = "hard"
+    criteria.criterion_modes = modes
+    return criteria
 
 
 def parse_customer_request_heuristic(customer_request: str) -> CustomerCriteria:
@@ -432,7 +539,7 @@ def parse_customer_request_heuristic(customer_request: str) -> CustomerCriteria:
         features=SourceStatus.EXPLICIT if desired_features or excluded_features else SourceStatus.UNKNOWN,
     )
 
-    return CustomerCriteria(
+    return finalize_criteria(CustomerCriteria(
         location=LocationCriteria(city=city, district=district, neighborhoods=neighborhoods),
         property_type=property_type,
         transaction_type=transaction_type,
@@ -445,7 +552,7 @@ def parse_customer_request_heuristic(customer_request: str) -> CustomerCriteria:
         excluded_features=excluded_features,
         sources=sources,
         analysis_method="Kural motoru",
-    )
+    ), customer_request)
 
 
 def parse_customer_request(
@@ -497,11 +604,11 @@ def parse_customer_request(
 
             if isinstance(response.parsed, CustomerCriteria):
                 response.parsed.analysis_method = f"Gemini / {current_model}"
-                return response.parsed
+                return finalize_criteria(response.parsed, customer_request)
             if response.text:
                 parsed = CustomerCriteria.model_validate_json(response.text)
                 parsed.analysis_method = f"Gemini / {current_model}"
-                return parsed
+                return finalize_criteria(parsed, customer_request)
         except (ValidationError, errors.ClientError, errors.ServerError, TimeoutError, Exception) as error:
             last_error = error
             continue

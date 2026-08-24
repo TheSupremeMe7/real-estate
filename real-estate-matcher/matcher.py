@@ -142,7 +142,7 @@ def calculate_financial_metrics(price: float, net_m2: float | None, gross_m2: fl
     }
 
 
-def passes_hard_constraints(
+def _legacy_passes_hard_constraints(
     listing: pd.Series | dict, criteria: CustomerCriteria
 ) -> bool:
     """Bir ilan bütün kesin kriterleri karşılıyorsa True döndürür."""
@@ -230,7 +230,7 @@ def budget_quality(price: float, criteria: CustomerCriteria) -> float:
     return 0.0
 
 
-def calculate_match_score(
+def _legacy_calculate_match_score(
     listing: pd.Series | dict, criteria: CustomerCriteria
 ) -> tuple[int, list[str], list[str]]:
     """İlanın aktif kriterlerdeki puanını, nedenlerini ve eksiklerini döndürür."""
@@ -336,6 +336,291 @@ def calculate_match_score(
     return score, reasons, missing
 
 
+def criterion_mode(criteria: CustomerCriteria, key: str, default: str) -> str:
+    mode = criteria.criterion_modes.get(key, default)
+    return mode if mode in {"hard", "preference", "ignore"} else default
+
+
+def _breakdown_item(
+    key: str,
+    label: str,
+    mode: str,
+    status: str,
+    points: float,
+    max_points: float,
+    detail: str,
+) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "mode": mode,
+        "status": status,
+        "points": round(points, 1),
+        "max_points": round(max_points, 1),
+        "detail": detail,
+    }
+
+
+def evaluate_listing_criteria(
+    listing: pd.Series | dict, criteria: CustomerCriteria
+) -> dict[str, Any]:
+    """Tüm aktif kriterleri tek kez değerlendirip normalize edilmiş puan dökümü üretir."""
+    breakdown: list[dict[str, Any]] = []
+
+    def add_boolean(
+        key: str,
+        label: str,
+        wanted: bool,
+        actual: bool | None,
+        weight_key: str,
+        default_mode: str,
+    ) -> None:
+        mode = criterion_mode(criteria, key, default_mode)
+        if mode == "ignore":
+            return
+        weight = MATCH_WEIGHTS[weight_key]
+        if actual is None:
+            status, points, detail = "unknown", 0.0, "İlan verisinde bilgi bulunmuyor"
+        elif actual is wanted:
+            status, points = "matched", float(weight)
+            detail = "İstenen değer mevcut" if wanted else "İstenmeyen özellik bulunmuyor"
+        else:
+            status, points = "unmatched", 0.0
+            detail = "Müşteri tercihiyle uyuşmuyor"
+        breakdown.append(_breakdown_item(key, label, mode, status, points, weight, detail))
+
+    location = criteria.location
+    if location.city or location.district or location.neighborhoods:
+        mode = criterion_mode(criteria, "location", "hard")
+        if mode != "ignore":
+            checks: list[tuple[str, bool]] = []
+            if location.city:
+                checks.append((location.city, location_matches(listing.get("city"), location.city)))
+            if location.district:
+                checks.append((location.district, location_matches(listing.get("district"), location.district)))
+            if location.neighborhoods:
+                requested = ", ".join(location.neighborhoods)
+                matched = any(
+                    location_matches(listing.get("neighborhood"), neighborhood)
+                    for neighborhood in location.neighborhoods
+                )
+                checks.append((requested, matched))
+            ratio = sum(int(matched) for _, matched in checks) / len(checks)
+            status = "matched" if ratio == 1 else ("partial" if ratio > 0 else "unmatched")
+            detail = (
+                f"İlan: {listing.get('city')} / {listing.get('district')} / {listing.get('neighborhood')}"
+            )
+            breakdown.append(
+                _breakdown_item(
+                    "location", "Konum", mode, status,
+                    MATCH_WEIGHTS["location"] * ratio, MATCH_WEIGHTS["location"], detail,
+                )
+            )
+
+    simple_checks = (
+        ("property_type", "Gayrimenkul türü", criteria.property_type, listing.get("property_type"), "property_type"),
+        ("transaction_type", "İlan türü", criteria.transaction_type, listing.get("transaction_type"), "transaction_type"),
+    )
+    for key, label, wanted, actual, weight_key in simple_checks:
+        if not wanted:
+            continue
+        mode = criterion_mode(criteria, key, "hard")
+        if mode == "ignore":
+            continue
+        matched = normalize_text(actual) == normalize_text(wanted)
+        breakdown.append(
+            _breakdown_item(
+                key, label, mode, "matched" if matched else "unmatched",
+                MATCH_WEIGHTS[weight_key] if matched else 0, MATCH_WEIGHTS[weight_key],
+                f"İstenen: {wanted} · İlan: {actual}",
+            )
+        )
+
+    if criteria.room_count:
+        mode = criterion_mode(criteria, "room_count", "hard")
+        if mode != "ignore":
+            actual_room = normalize_text(listing.get("room_count"))
+            matched = actual_room in {normalize_text(room) for room in criteria.room_count}
+            breakdown.append(
+                _breakdown_item(
+                    "room_count", "Oda sayısı", mode,
+                    "matched" if matched else "unmatched",
+                    MATCH_WEIGHTS["room_count"] if matched else 0,
+                    MATCH_WEIGHTS["room_count"],
+                    f"İstenen: {', '.join(criteria.room_count)} · İlan: {listing.get('room_count')}",
+                )
+            )
+
+    if criteria.price.minimum is not None or criteria.price.maximum is not None:
+        mode = criterion_mode(criteria, "budget", "hard")
+        if mode != "ignore":
+            price = pd.to_numeric(listing.get("price"), errors="coerce")
+            weight = MATCH_WEIGHTS["budget"]
+            if pd.isna(price):
+                status, points, detail = "unknown", 0.0, "Fiyat bilgisi bulunmuyor"
+            else:
+                below = criteria.price.minimum is not None and price < criteria.price.minimum
+                above = criteria.price.maximum is not None and price > criteria.price.maximum
+                if not below and not above:
+                    status, points = "matched", float(weight)
+                    detail = f"Bütçe içinde: {price:,.0f} TL".replace(",", ".")
+                else:
+                    reference = criteria.price.minimum if below else criteria.price.maximum
+                    difference = abs(float(price) - float(reference))
+                    deviation = difference / max(float(reference), 1)
+                    if deviation <= 0.15:
+                        status = "partial"
+                        points = weight * max(0.0, 1 - deviation / 0.15) * 0.75
+                        direction = "altında" if below else "üzerinde"
+                        detail = (
+                            f"Sınırın {difference:,.0f} TL (%{deviation * 100:.1f}) {direction}"
+                        ).replace(",", ".")
+                    else:
+                        status, points = "unmatched", 0.0
+                        detail = f"Bütçe sınırıyla uyuşmuyor: {price:,.0f} TL".replace(",", ".")
+            breakdown.append(_breakdown_item("budget", "Bütçe", mode, status, points, weight, detail))
+
+    if criteria.area.minimum_net_m2 is not None or criteria.area.minimum_gross_m2 is not None:
+        mode = criterion_mode(criteria, "area", "hard")
+        if mode != "ignore":
+            ratios = []
+            details = []
+            for column, wanted, label in (
+                ("net_m2", criteria.area.minimum_net_m2, "net"),
+                ("gross_m2", criteria.area.minimum_gross_m2, "brüt"),
+            ):
+                if wanted is None:
+                    continue
+                actual = pd.to_numeric(listing.get(column), errors="coerce")
+                if pd.isna(actual):
+                    ratios.append(None)
+                    details.append(f"{label} alan bilinmiyor")
+                else:
+                    ratios.append(min(float(actual) / max(wanted, 1), 1.0))
+                    details.append(f"{actual:g} m² {label} / en az {wanted} m²")
+            known_ratios = [ratio for ratio in ratios if ratio is not None]
+            if not known_ratios:
+                status, ratio = "unknown", 0.0
+            else:
+                ratio = min(known_ratios)
+                status = "matched" if ratio >= 1 else ("partial" if ratio >= 0.75 else "unmatched")
+            breakdown.append(
+                _breakdown_item(
+                    "area", "Alan", mode, status, MATCH_WEIGHTS["area"] * ratio,
+                    MATCH_WEIGHTS["area"], " · ".join(details),
+                )
+            )
+
+    hard = criteria.hard_requirements
+    soft = criteria.soft_preferences
+    boolean_definitions = (
+        ("in_complex", "Site içinde", "in_complex", "in_complex"),
+        ("balcony", "Balkon", "balcony", "balcony"),
+        ("furnished", "Eşyalı", "furnished", "other"),
+    )
+    for key, label, column, weight_key in boolean_definitions:
+        hard_value = getattr(hard, key)
+        soft_value = getattr(soft, key)
+        wanted = hard_value if hard_value is not None else soft_value
+        if wanted is not None:
+            add_boolean(
+                key, label, wanted, normalize_boolean(listing.get(column)), weight_key,
+                "hard" if hard_value is not None else "preference",
+            )
+
+    hard_metro = hard.near_metro
+    soft_metro = soft.near_metro
+    wanted_metro = hard_metro if hard_metro is not None else soft_metro
+    if wanted_metro is not None:
+        add_boolean(
+            "near_metro", "Metro yakınlığı", wanted_metro, is_near_metro(listing),
+            "near_metro", "hard" if hard_metro is not None else "preference",
+        )
+
+    for feature in criteria.desired_features:
+        key = f"feature:{feature}"
+        mode = criterion_mode(criteria, key, "preference")
+        if mode == "ignore":
+            continue
+        matched = listing_has_feature(listing, feature)
+        breakdown.append(
+            _breakdown_item(
+                key, feature.title(), mode, "matched" if matched else "unmatched",
+                MATCH_WEIGHTS["other"] if matched else 0, MATCH_WEIGHTS["other"],
+                "İlan verisinde doğrulandı" if matched else "İlan verisinde doğrulanamadı",
+            )
+        )
+
+    for feature in criteria.excluded_features:
+        key = f"exclude:{feature}"
+        mode = criterion_mode(criteria, key, "hard")
+        if mode == "ignore":
+            continue
+        found = listing_has_feature(listing, feature)
+        breakdown.append(
+            _breakdown_item(
+                key, f"Olmamalı: {feature}", mode, "unmatched" if found else "matched",
+                0 if found else MATCH_WEIGHTS["other"], MATCH_WEIGHTS["other"],
+                "İstenmeyen özellik ilanda var" if found else "İstenmeyen özellik bulunmuyor",
+            )
+        )
+
+    for preference in criteria.unverified_preferences:
+        breakdown.append(
+            _breakdown_item(
+                f"unverified:{preference}", preference.title(), "preference", "unknown",
+                0, 0, "Ölçülebilir portföy verisi olmadığı için puanlanmadı",
+            )
+        )
+
+    scored_items = [item for item in breakdown if item["max_points"] > 0]
+    earned = sum(item["points"] for item in scored_items)
+    possible = sum(item["max_points"] for item in scored_items)
+    score = round((earned / possible) * 100) if possible else 0
+    score = max(0, min(100, score))
+    matched = [item for item in breakdown if item["status"] == "matched"]
+    partial = [item for item in breakdown if item["status"] == "partial"]
+    unmatched = [item for item in breakdown if item["status"] == "unmatched"]
+    unknown = [item for item in breakdown if item["status"] == "unknown"]
+    return {
+        "score": score,
+        "earned": round(earned, 1),
+        "possible": round(possible, 1),
+        "breakdown": breakdown,
+        "matched": matched,
+        "partial": partial,
+        "unmatched": unmatched,
+        "unknown": unknown,
+    }
+
+
+def passes_hard_constraints(
+    listing: pd.Series | dict, criteria: CustomerCriteria
+) -> bool:
+    if normalize_text(listing.get("status")) != "active":
+        return False
+    evaluation = evaluate_listing_criteria(listing, criteria)
+    return not any(
+        item["mode"] == "hard" and item["status"] != "matched"
+        for item in evaluation["breakdown"]
+    )
+
+
+def calculate_match_score(
+    listing: pd.Series | dict, criteria: CustomerCriteria
+) -> tuple[int, list[str], list[str]]:
+    evaluation = evaluate_listing_criteria(listing, criteria)
+    reasons = [
+        f"{item['label']}: {item['detail']} (+{item['points']:g}/{item['max_points']:g})"
+        for item in evaluation["matched"]
+    ]
+    missing = [
+        f"{item['label']}: {item['detail']}"
+        for item in [*evaluation["partial"], *evaluation["unmatched"], *evaluation["unknown"]]
+    ]
+    return evaluation["score"], reasons, missing
+
+
 def match_listings(
     listings: pd.DataFrame, criteria: CustomerCriteria
 ) -> list[dict[str, Any]]:
@@ -344,6 +629,7 @@ def match_listings(
     for _, listing in listings.iterrows():
         if not passes_hard_constraints(listing, criteria):
             continue
+        evaluation = evaluate_listing_criteria(listing, criteria)
         score, reasons, missing = calculate_match_score(listing, criteria)
         result = listing.where(pd.notna(listing), None).to_dict()
 
@@ -354,6 +640,13 @@ def match_listings(
 
         result.update(
             match_score=score,
+            match_points_earned=evaluation["earned"],
+            match_points_possible=evaluation["possible"],
+            match_breakdown=evaluation["breakdown"],
+            matched_criteria=evaluation["matched"],
+            partial_criteria=evaluation["partial"],
+            unmatched_criteria=evaluation["unmatched"],
+            unknown_criteria=evaluation["unknown"],
             match_reasons=reasons,
             missing_information=missing,
             **financials,
@@ -363,7 +656,7 @@ def match_listings(
     return sorted(results, key=lambda item: item["match_score"], reverse=True)
 
 
-def find_near_matches(
+def _legacy_find_near_matches(
     listings: pd.DataFrame, criteria: CustomerCriteria, budget_tolerance_pct: float = 0.15, max_results: int = 4
 ) -> list[dict[str, Any]]:
     """Kesin filtreleri hafifçe aşan (örneğin bütçeyi %5-15 aşan veya komşu lokasyondaki) alternatif fırsatları bulur."""
@@ -434,10 +727,78 @@ def find_near_matches(
     return near_matches[:max_results]
 
 
+def find_near_matches(
+    listings: pd.DataFrame,
+    criteria: CustomerCriteria,
+    budget_tolerance_pct: float = 0.15,
+    max_results: int = 4,
+) -> list[dict[str, Any]]:
+    """En fazla iki zorunlu kriteri kaçıran, gerekçesi açık alternatifleri döndürür."""
+    exact_ids = {item["listing_id"] for item in match_listings(listings, criteria)}
+    alternatives: list[dict[str, Any]] = []
+
+    for _, listing in listings.iterrows():
+        if normalize_text(listing.get("status")) != "active":
+            continue
+        if listing.get("listing_id") in exact_ids:
+            continue
+
+        evaluation = evaluate_listing_criteria(listing, criteria)
+        hard_failures = [
+            item for item in evaluation["breakdown"]
+            if item["mode"] == "hard" and item["status"] != "matched"
+        ]
+        if not hard_failures or len(hard_failures) > 2:
+            continue
+
+        budget_failure = next((item for item in hard_failures if item["key"] == "budget"), None)
+        if budget_failure and criteria.price.maximum:
+            price = pd.to_numeric(listing.get("price"), errors="coerce")
+            if pd.isna(price) or price > criteria.price.maximum * (1 + budget_tolerance_pct):
+                continue
+
+        if evaluation["score"] < 45:
+            continue
+
+        relaxation_notes = [
+            f"{item['label']}: {item['detail']}"
+            for item in hard_failures
+        ]
+        score, reasons, missing = calculate_match_score(listing, criteria)
+        result = listing.where(pd.notna(listing), None).to_dict()
+        price = float(result.get("price") or 0)
+        net_m2 = float(result.get("net_m2")) if result.get("net_m2") else None
+        gross_m2 = float(result.get("gross_m2")) if result.get("gross_m2") else None
+        result.update(
+            match_score=score,
+            match_points_earned=evaluation["earned"],
+            match_points_possible=evaluation["possible"],
+            match_breakdown=evaluation["breakdown"],
+            matched_criteria=evaluation["matched"],
+            partial_criteria=evaluation["partial"],
+            unmatched_criteria=evaluation["unmatched"],
+            unknown_criteria=evaluation["unknown"],
+            match_reasons=reasons,
+            missing_information=missing,
+            relaxation_notes=relaxation_notes,
+            **calculate_financial_metrics(price, net_m2, gross_m2),
+        )
+        alternatives.append(result)
+
+    alternatives.sort(
+        key=lambda item: (
+            len([entry for entry in item["match_breakdown"] if entry["mode"] == "hard" and entry["status"] != "matched"]),
+            -item["match_score"],
+        )
+    )
+    return alternatives[:max_results]
+
+
 def generate_client_pitch(
     matched_listings: list[dict[str, Any]],
     client_name: str = "Değerli Müşterimiz",
     consultant_name: str = "Emlak Danışmanınız",
+    consultant_phone: str = "",
 ) -> str:
     """Eşleşen ilanlar için danışmanın doğrudan WhatsApp veya e-posta ile gönderebileceği Türkçe metin üretir."""
     if not matched_listings:
@@ -449,7 +810,7 @@ def generate_client_pitch(
     lines = [
         f"Merhaba {client_name}, 👋",
         "",
-        f"Belirttiğiniz kriterlere tam uyan **{count} adet harika gayrimenkul** seçtim. Detayları aşağıda paylaşıyorum:",
+        f"Belirttiğiniz kriterlere göre öne çıkan *{count} gayrimenkulü* sizin için seçtim:",
         "━━━━━━━━━━━━━━━━━━━━━",
     ]
 
@@ -460,27 +821,36 @@ def generate_client_pitch(
         neighborhood = listing.get("neighborhood", "")
         title = listing.get("title", "")
 
-        lines.append(f"🏡 **SEÇENEK {index}: {title}**")
-        lines.append(f"📍 **Konum:** {neighborhood} / {listing.get('district', '')}")
-        lines.append(f"💰 **Fiyat:** {price_str}")
-        lines.append(f"📐 **Özellikler:** {room_str} • {m2_str} • Kat: {listing.get('floor', '-')}")
+        transport = str(listing.get("transport_notes") or "")
+        metro_match = re.search(r"(?:metro|istasyon)[^0-9]{0,15}(\d+(?:[.,]\d+)?)\s*(m|km)", transport, re.IGNORECASE)
+        metro_text = f"{metro_match.group(1)} {metro_match.group(2)}" if metro_match else "Mesafe teyit edilmeli"
+        lines.append(f"🏡 *SEÇENEK {index}: {title}*")
+        lines.append(f"📊 *Müşteri uyumu:* %{listing.get('match_score', 0)}")
+        lines.append(f"📍 *Konum:* {neighborhood} / {listing.get('district', '')}")
+        lines.append(f"💰 *Fiyat:* {price_str}")
+        lines.append(f"📐 *Özellikler:* {room_str} • {m2_str} • Kat: {listing.get('floor', '-')}")
+        lines.append(f"🏢 *Bina yaşı:* {listing.get('building_age', 'Bilinmiyor')}")
+        lines.append(f"🚇 *Metro:* {metro_text}")
+        lines.append(f"🔢 *İlan numarası:* {listing.get('listing_id', '-')}")
 
         reasons = listing.get("match_reasons", [])
         if reasons:
             top_reasons = " • ".join(reasons[:2])
-            lines.append(f"✨ **Neden Uygun?** {top_reasons}")
+            lines.append(f"✨ *Neden uygun?* {top_reasons}")
 
         listing_url = str(listing.get("listing_url") or "").strip()
         if listing_url.startswith(("http://", "https://")) and "example.com" not in listing_url.lower():
-            lines.append(f"🔗 **İlan Linki:** {listing['listing_url']}")
+            lines.append(f"🔗 *İlan linki:* {listing['listing_url']}")
 
         lines.append("─────────────────────")
 
     lines.extend([
         "Hangi ilanı birlikte yerinde görmek istersiniz? Size uygun gün ve saati iletirseniz randevu organize edebilirim. ☕",
         "",
-        f"Saygılarımla,\n**{consultant_name}**",
+        f"Saygılarımla,\n*{consultant_name}*",
     ])
+    if consultant_phone.strip():
+        lines.append(f"📞 {consultant_phone.strip()}")
 
     return "\n".join(lines)
 

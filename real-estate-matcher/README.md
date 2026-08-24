@@ -10,7 +10,10 @@ sunan Streamlit uygulaması.
 - Satılık ve kiralık portföyler için ayrı KPI ve piyasa hesapları
 - Gemini destekli kriter çıkarma ve API yoksa yerel kural motoru
 - Konum, işlem türü, oda, bütçe, alan ve ayrıntılı donanım puanlaması
-- Her sonuçta puan dökümü, karşılanan ve eksik kriterler
+- Aktif kriter ağırlıklarından hesaplanan, 0-100 aralığında normalize edilmiş uyum yüzdesi
+- Her kriter için zorunlu, tercih veya önemsiz seçimi
+- Karşılanan, kısmen karşılanan, karşılanmayan ve verisi bilinmeyen kriter dökümü
+- Müşteri profili, talep notları ve gönderilen ilan geçmişi
 - 2-4 ilanı oturum durumuyla karşılaştırma
 - WhatsApp müşteri sunumu
 - CSV portföy yönetimi ve dışa aktarma
@@ -58,6 +61,24 @@ real-estate-matcher/app.py
 GitHub'daki `main` dalına gönderilen her commit Streamlit Cloud tarafından otomatik
 olarak yeniden yayınlanır. Uygulama veriyi `real-estate-matcher/data/listings.csv`
 dosyasından okur.
+
+Müşteri kayıtları yerel kullanımda `data/customers.json` dosyasında tutulur ve bu
+dosya GitHub'a gönderilmez. Streamlit Community Cloud'un dosya sistemi kalıcı bir
+veritabanı değildir; çok kullanıcılı ve kalıcı müşteri geçmişi için PostgreSQL veya
+Supabase gibi harici bir veritabanı bağlanmalıdır.
+
+## Puanlama mantığı
+
+Her ilan, yalnızca puana dahil edilen kriterlerin toplam ağırlığı üzerinden hesaplanır:
+
+```text
+uyum yüzdesi = kazanılan puan / mümkün olan puan * 100
+```
+
+Zorunlu bir kriter karşılanmazsa ilan kesin sonuçlardan elenir. Tercih kriterleri
+sonuçları elemez, yalnızca sıralamayı etkiler. `Ferah`, `lüks` ve `sakin` gibi ilan
+verisinden güvenilir biçimde doğrulanamayan öznel istekler kullanıcıya gösterilir,
+ancak uyum yüzdesine puan eklemez.
 
 ## Veri üretimi
 
