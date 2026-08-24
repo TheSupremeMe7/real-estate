@@ -31,5 +31,8 @@ backgroundColor = "#17211D"
 secondaryBackgroundColor = "#223029"
 textColor = "#EDF6F2"
 
+[browser]
+gatherUsageStats = false
+
 [server]
 headless = true

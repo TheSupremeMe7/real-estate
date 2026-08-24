@@ -1,7 +1,7 @@
 # Emlak Eşleştirici
 
-Google Sheets portföyünü Gemini destekli müşteri talepleriyle eşleştiren
-Streamlit web uygulaması.
+500 ilanlık ayrıntılı portföyü Gemini veya yerel kural motoruyla müşteri
+taleplerine göre eşleştiren Streamlit web uygulaması.
 
 Streamlit Community Cloud giriş dosyası:
 

@@ -1,781 +1,1066 @@
-import json
-import os
+"""AI Emlak İlan Eşleştirme ve Portföy Zekası Uygulaması."""
+
+import sys
+import time
 import re
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
 
-from ai_request_parser import GEMINI_MODEL, parse_customer_request
-from feature_catalog import PROPERTY_FEATURE_CATALOG
-from sheet_store import LISTING_COLUMNS, load_sheet_listings
+# Eğer doğrudan 'python app.py' veya IDE 'Çalıştır' (Run) butonu ile çalıştırıldıysa Streamlit'i başlat
+if not st.runtime.exists():
+    from streamlit.web import cli as stcli
+
+    sys.argv = ["streamlit", "run", __file__]
+    sys.exit(stcli.main())
 
 
-APP_DIR = Path(__file__).parent
-LISTINGS_FILE = APP_DIR / "listings.csv"
-ENV_FILE = APP_DIR / ".env"
-DEFAULT_CREDENTIALS_FILE = APP_DIR.parent / "credentials.json"
-FEATURE_ALIASES = {
-    "bahçe": ("bahçe", "özel yeşil alan"),
-    "manzara": ("manzara", "ön cephe"),
-    "deniz": ("deniz", "su manzarası"),
-    "otopark": ("otopark", "araçlık"),
-    "havuz": ("havuz", "yüzme"),
-    "teras": ("teras", "pergola", "açık hava"),
-    "depo": ("depo", "kiler", "depolama", "gömme dolap"),
-    "ofis": ("ofis", "çalışma alanı"),
-    "akıllı ev": ("akıllı", "telefonla kontrol"),
-    "asansör": ("asansör", "engelsiz giriş"),
-    "evcil hayvan": ("evcil hayvan", "çevrili özel bahçe"),
-    "ebeveyn": ("ebeveyn", "giyinme odası"),
-    "yüksek tavan": ("yüksek tavan", "tavandan zemine"),
-    "güneş": ("güneş", "gün ışığı", "sabah ışığı"),
-    "okul": ("okul", "günlük ihtiyaç"),
+from criteria_parser import (
+    DEFAULT_GEMINI_MODEL,
+    FALLBACK_GEMINI_MODELS,
+    CriteriaParserError,
+    parse_customer_request,
+)
+from matcher import (
+    find_near_matches,
+    generate_client_pitch,
+    get_whatsapp_share_url,
+    match_listings,
+    normalize_boolean,
+)
+
+
+DATA_FILE = Path(__file__).parent / "data" / "listings.csv"
+REQUIRED_COLUMNS = {
+    "listing_id",
+    "title",
+    "city",
+    "district",
+    "neighborhood",
+    "property_type",
+    "transaction_type",
+    "room_count",
+    "price",
+    "gross_m2",
+    "net_m2",
+    "building_age",
+    "floor",
+    "heating",
+    "balcony",
+    "furnished",
+    "in_complex",
+    "transport_notes",
+    "description",
+    "listing_url",
+    "image_url",
+    "status",
+}
+
+BOOLEAN_FILTER_OPTIONS = {
+    "Tümü / Fark etmez": None,
+    "Evet": "true",
+    "Hayır": "false",
+    "Bilinmiyor": "unknown",
+}
+
+SAMPLE_PERSONAS = {
+    "👨‍👩‍👧 Aile Evi (Kayaşehir 3+1)": (
+        "Kayaşehir'de güvenlikli site içerisinde 3+1, maksimum 8 milyon TL, "
+        "balkonlu ve metroya yürüme mesafesinde ferah bir daire arıyorum."
+    ),
+    "💼 Yatırımlık Rezidans (1+1 Eşyalı)": (
+        "Başakşehir veya Kayaşehir'de yatırımlık, eşyalı 1+1 rezidans daire. "
+        "Bütçem maksimum 4.5 milyon TL. Metroya çok yakın olmalı."
+    ),
+    "🌿 Müstakil & Bahçeli Ev": (
+        "Sakin bir konumda, bahçe kullanımlı veya müstakil 3+1 ev arıyorum. "
+        "Bütçem yaklaşık 7 milyon TL."
+    ),
+    "🏰 Geniş Lüks Site Dairesi (4+1)": (
+        "Başakşehir'de kalabalık ailemiz için en az 180 m2 net alanı olan, "
+        "yeni binada 4+1 site içi lüks daire arıyoruz. Bütçe 12 milyon TL'ye kadar."
+    ),
 }
 
 
-def setting(name: str, default: str = "") -> str:
-    value = os.getenv(name, "").strip()
-    if value:
-        return value
-    try:
-        return str(st.secrets.get(name, default)).strip()
-    except FileNotFoundError:
-        return default
+# --- VERİ YÜKLEME VE YÖNETİMİ ---
 
-
-@st.cache_data(ttl=300)
-def load_listings() -> tuple[pd.DataFrame, str]:
-    load_dotenv(ENV_FILE, override=True)
-    sample_listings = pd.read_csv(LISTINGS_FILE, encoding="utf-8-sig")
-    spreadsheet_id = setting("REAL_ESTATE_SHEET_ID")
-    credentials_path = Path(
-        setting("GOOGLE_CREDENTIALS_FILE", str(DEFAULT_CREDENTIALS_FILE))
-    )
-    credentials_json = setting("GOOGLE_CREDENTIALS_JSON")
-
-    if not spreadsheet_id:
-        return sample_listings, "Örnek portföy"
-    if credentials_json:
-        credentials_source = json.loads(credentials_json)
-    elif credentials_path.exists():
-        credentials_source = credentials_path
-    else:
-        raise FileNotFoundError(f"Google credentials bulunamadı: {credentials_path}")
-
-    listings = load_sheet_listings(spreadsheet_id, credentials_source, sample_listings)
-    return listings, "Google Sheets"
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def analyze_request(
-    api_key: str,
-    request: str,
-    districts: tuple[str, ...],
-    rooms: tuple[str, ...],
-):
-    return parse_customer_request(api_key, request, list(districts), list(rooms))
-
-
-def normalize_option_values(values: object, options: list[str]) -> list[str]:
-    if isinstance(values, str):
-        values = [values]
-    if not isinstance(values, list):
-        return []
-    lookup = {option.casefold().replace(" ", ""): option for option in options}
-    normalized = []
-    for value in values:
-        key = str(value).casefold().replace(" ", "")
-        if key in lookup and lookup[key] not in normalized:
-            normalized.append(lookup[key])
-    return normalized
-
-
-def feature_matches_listing(feature: str, listing: pd.Series) -> bool:
-    searchable = " ".join(
-        str(listing.get(column, ""))
-        for column in (
-            "title", "property_type", "description", "highlight", "heating",
-            "facade", "parking", "security", "view", "outdoor_space",
-            "kitchen_type", "amenities", "nearby_places", "technical_details",
-            "building_features",
-        )
-    ).casefold()
-    feature_text = feature.casefold().strip()
-    for canonical, aliases in FEATURE_ALIASES.items():
-        if canonical in feature_text or any(alias in feature_text for alias in aliases):
-            return any(alias in searchable for alias in aliases)
-    words = [word for word in re.findall(r"\w+", feature_text) if len(word) >= 4]
-    return bool(words) and all(word in searchable for word in words)
-
-
-def parse_request(
-    request: str,
-    districts: list[str],
-    neighborhoods: list[str] | None = None,
-    property_types: list[str] | None = None,
-) -> dict[str, object]:
-    """Extract common Turkish property criteria without an API call."""
-    request_lower = request.casefold()
-    parsed: dict[str, object] = {}
-
-    number_words = {
-        "sıfır": "0", "bir": "1", "iki": "2", "üç": "3", "dört": "4",
-        "beş": "5", "altı": "6", "yedi": "7", "sekiz": "8", "dokuz": "9",
+@st.cache_data
+def load_listings_from_disk(file_path: Path) -> pd.DataFrame:
+    """CSV dosyasını okur, eski/yeni portföy şemalarını tek biçime getirir."""
+    if not file_path.exists():
+        raise FileNotFoundError(f"Dosya bulunamadı: {file_path}")
+    listings = pd.read_csv(file_path, encoding="utf-8-sig")
+    listings.columns = listings.columns.astype(str).str.strip()
+    aliases = {
+        "listing_type": "transaction_type",
+        "nearby_places": "transport_notes",
     }
-    normalized_request = request_lower.replace("artı", "+").replace("arti", "+")
-    for word, digit in number_words.items():
-        normalized_request = re.sub(rf"\b{word}\b", digit, normalized_request)
-    room_match = re.search(r"(\d+)\s*\+\s*(\d+)", normalized_request)
-    if room_match:
-        parsed["room_count"] = f"{room_match.group(1)}+{room_match.group(2)}"
+    for source, target in aliases.items():
+        if target not in listings.columns and source in listings.columns:
+            listings[target] = listings[source]
 
-    million_match = re.search(r"([\d.,]+)\s*milyon", request_lower)
-    if million_match:
-        value = float(million_match.group(1).replace(",", "."))
-        parsed["max_price"] = int(value * 1_000_000)
+    defaults = {
+        "transaction_type": "Satılık",
+        "transport_notes": "",
+        "listing_url": "",
+        "image_url": "",
+        "status": "active",
+    }
+    for column, default in defaults.items():
+        if column not in listings.columns:
+            listings[column] = default
 
-    for district in districts:
-        if district.casefold() in request_lower:
-            parsed["district"] = district
-            break
-
-    for neighborhood in neighborhoods or []:
-        if neighborhood.casefold() in request_lower:
-            parsed["neighborhood"] = neighborhood
-            break
-
-    for property_type in property_types or []:
-        if property_type.casefold() in request_lower:
-            parsed["property_type"] = property_type
-            break
-
-    parsed["balcony"] = "balkon" in request_lower
-    parsed["in_complex"] = any(word in request_lower for word in ("site içinde", "sitede"))
-    parsed["near_metro"] = "metro" in request_lower
-    detected_features = []
-    for canonical, aliases in FEATURE_ALIASES.items():
-        if canonical in request_lower or any(alias in request_lower for alias in aliases):
-            detected_features.append(canonical)
-    catalog_matches = [
-        feature for feature in PROPERTY_FEATURE_CATALOG
-        if feature in request_lower
-    ]
-    if not detected_features:
-        detected_features.extend(sorted(catalog_matches, key=len, reverse=True)[:8])
-    detected_features = list(dict.fromkeys(detected_features))
-    parsed["must_have"] = detected_features
-    return parsed
+    transaction_normalized = (
+        listings["transaction_type"].fillna("").astype(str).str.strip().str.lower()
+    )
+    listings["transaction_type"] = transaction_normalized.replace(
+        {
+            "satilik": "Satılık", "satılık": "Satılık",
+            "kira": "Kiralık", "kiralik": "Kiralık", "kiralık": "Kiralık",
+        }
+    )
+    for column in (
+        "price", "gross_m2", "net_m2", "building_age", "dues",
+        "estimated_monthly_rent", "roi_years", "annual_roi_pct",
+    ):
+        if column in listings.columns:
+            cleaned = (
+                listings[column].astype(str)
+                .str.replace(r"[^0-9,.-]", "", regex=True)
+                .str.replace(",", ".", regex=False)
+            )
+            listings[column] = pd.to_numeric(cleaned, errors="coerce")
+    missing_columns = REQUIRED_COLUMNS - set(listings.columns)
+    if missing_columns:
+        missing_text = ", ".join(sorted(missing_columns))
+        raise ValueError(f"Eksik kolonlar: {missing_text}")
+    return listings
 
 
-def listing_matches_required_criteria(
-    listing: pd.Series,
-    max_price: int,
-    districts: list[str],
-    neighborhoods: list[str],
-    rooms: list[str],
-    property_types: list[str],
-    min_gross_m2: int,
-    balcony: bool,
-    in_complex: bool,
-    near_metro: bool,
-    required_features: list[str] | None = None,
-) -> bool:
-    return all(
-        [
-            not max_price or int(listing["price"]) <= max_price,
-            not districts or listing["district"] in districts,
-            not neighborhoods or listing["neighborhood"] in neighborhoods,
-            not rooms or listing["room_count"] in rooms,
-            not property_types or listing["property_type"] in property_types,
-            not min_gross_m2 or int(listing["gross_m2"]) >= min_gross_m2,
-            not balcony or bool(listing["balcony"]),
-            not in_complex or bool(listing["in_complex"]),
-            not near_metro or bool(listing["near_metro"]),
-            all(
-                feature_matches_listing(feature, listing)
-                for feature in (required_features or [])
-            ),
+def get_listings_df() -> pd.DataFrame:
+    """Session state'deki güncel ilan verisini veya diskten yüklenen veriyi döndürür."""
+    if "listings_df" not in st.session_state or st.session_state["listings_df"] is None:
+        try:
+            st.session_state["listings_df"] = load_listings_from_disk(DATA_FILE)
+        except Exception as error:
+            st.session_state["listings_df"] = pd.DataFrame(columns=list(REQUIRED_COLUMNS))
+            st.error(f"İlan verisi okunamadı: {error}")
+    return st.session_state["listings_df"]
+
+
+def filter_manual_listings(
+    listings: pd.DataFrame,
+    city: str | None,
+    district: str | None,
+    neighborhood: str | None,
+    transaction_type: str | None,
+    property_type: str | None,
+    room_count: str | None,
+    minimum_price: int,
+    maximum_price: int,
+    minimum_net_m2: int,
+    in_complex: str | None,
+    balcony: str | None,
+    furnished: str | None,
+    status: str = "active",
+) -> pd.DataFrame:
+    """Manuel filtrelere göre ilanları süzer."""
+    filtered = listings.copy()
+    if status and status != "Tümü":
+        filtered = filtered[
+            filtered["status"].fillna("").astype(str).str.lower().eq(status.lower())
         ]
-    )
 
-
-def score_listing(
-    listing: pd.Series,
-    max_price: int,
-    selected_districts: list[str],
-    selected_neighborhoods: list[str],
-    selected_rooms: list[str],
-    selected_property_types: list[str],
-    min_gross_m2: int,
-    balcony: bool,
-    in_complex: bool,
-    near_metro: bool,
-    requested_features: list[str] | None = None,
-) -> tuple[int, list[str], list[dict[str, object]]]:
-    earned_points = 0.0
-    possible_points = 0.0
-    reasons: list[str] = []
-    breakdown: list[dict[str, object]] = []
-
-    def add_criterion(label: str, weight: int, earned: float, detail: str) -> None:
-        nonlocal earned_points, possible_points
-        possible_points += weight
-        earned_points += earned
-        breakdown.append(
-            {"label": label, "earned": earned, "possible": weight, "detail": detail}
-        )
-
-    if max_price > 0:
-        price = int(listing["price"])
-        if price <= max_price:
-            budget_points = 20
-            budget_detail = "Bütçe içinde"
-            reasons.append("Bütçeye uygun")
-        elif price <= max_price * 1.10:
-            budget_points = 10
-            budget_detail = f"Bütçenin %{round((price / max_price - 1) * 100)} üzerinde"
-        elif price <= max_price * 1.25:
-            budget_points = 5
-            budget_detail = f"Bütçenin %{round((price / max_price - 1) * 100)} üzerinde"
-        else:
-            budget_points = 0
-            budget_detail = "Bütçenin belirgin üzerinde"
-        add_criterion("Bütçe", 20, budget_points, budget_detail)
-
-    if selected_districts:
-        matched = listing["district"] in selected_districts
-        add_criterion("İlçe", 15, 15 if matched else 0, str(listing["district"]))
-        if matched:
-            reasons.append("Bölge tercihiyle eşleşiyor")
-
-    if selected_neighborhoods:
-        matched = listing["neighborhood"] in selected_neighborhoods
-        add_criterion("Mahalle", 10, 10 if matched else 0, str(listing["neighborhood"]))
-        if matched:
-            reasons.append("Mahalle tercihiyle eşleşiyor")
-
-    if selected_rooms:
-        matched = listing["room_count"] in selected_rooms
-        add_criterion("Oda planı", 15, 15 if matched else 0, str(listing["room_count"]))
-        if matched:
-            reasons.append(f"{listing['room_count']} oda planı uygun")
-
-    if selected_property_types:
-        matched = listing["property_type"] in selected_property_types
-        add_criterion("Konut tipi", 10, 10 if matched else 0, str(listing["property_type"]))
-        if matched:
-            reasons.append(f"{listing['property_type']} tipi uygun")
-
-    if min_gross_m2 > 0:
-        matched = int(listing["gross_m2"]) >= min_gross_m2
-        add_criterion("Brüt alan", 10, 10 if matched else 0, f"{listing['gross_m2']} m²")
-        if matched:
-            reasons.append(f"En az {min_gross_m2} m² şartını karşılıyor")
-
-    feature_checks = [
-        (balcony, bool(listing["balcony"]), "Balkonlu", 8),
-        (in_complex, bool(listing["in_complex"]), "Site içinde", 8),
-        (near_metro, bool(listing["near_metro"]), "Metroya yakın", 8),
-    ]
-    for requested, available, label, weight in feature_checks:
-        if requested:
-            add_criterion(label, weight, weight if available else 0, "Var" if available else "Yok")
-            if available:
-                reasons.append(label)
-
-    for feature in requested_features or []:
-        matched = feature_matches_listing(feature, listing)
-        add_criterion(feature.capitalize(), 7, 7 if matched else 0, "Eşleşti" if matched else "Bulunamadı")
-        if matched:
-            reasons.append(f"{feature.capitalize()} tercihiyle eşleşiyor")
-
-    if possible_points == 0:
-        return 50, ["Karşılaştırma için daha fazla kriter gerekli"], []
-    score = round(earned_points / possible_points * 100)
-    return score, reasons, breakdown
-
-
-def format_price(price: int) -> str:
-    return f"{price:,.0f} TL".replace(",", ".")
-
-
-def build_customer_report(
-    customer_request: str,
-    selected_matches: list[tuple[int, list[str], list[dict[str, object]], pd.Series]],
-) -> str:
-    lines = ["EMLAK İLAN ÖNERİLERİ", ""]
-    if customer_request.strip():
-        lines.extend([f"Müşteri talebi: {customer_request.strip()}", ""])
-
-    for index, (score, reasons, breakdown, listing) in enumerate(selected_matches, start=1):
-        score_details = "; ".join(
-            f"{item['label']} {item['earned']:.0f}/{item['possible']}"
-            for item in breakdown
-        )
-        lines.extend(
-            [
-                f"{index}. {listing['title']} - %{score} eşleşme",
-                f"Konum: {listing['district']} / {listing['neighborhood']}",
-                f"Özellikler: {listing['room_count']} · {listing['gross_m2']} m² · {listing['property_type']}",
-                f"Net alan: {listing.get('net_m2', 0)} m² · Kat: {listing.get('floor', '-')} / {listing.get('total_floors', '-')} · Banyo: {listing.get('bathroom_count', '-')}",
-                f"Isıtma: {listing.get('heating', '-')} · Cephe: {listing.get('facade', '-')} · Mutfak: {listing.get('kitchen_type', '-')}",
-                f"Otopark: {listing.get('parking', '-')} · Güvenlik: {listing.get('security', '-')} · Manzara: {listing.get('view', '-')}",
-                f"Site olanakları: {listing.get('amenities', '-')}",
-                f"Yakın çevre: {listing.get('nearby_places', '-')}",
-                f"Teknik: {listing.get('technical_details', '-')}",
-                "Bina özellikleri:",
-                *[
-                    f"- {feature.strip()}"
-                    for feature in str(listing.get("building_features", "")).split(";")
-                    if feature.strip()
-                ],
-                f"Fiyat: {format_price(int(listing['price']))}",
-                f"Öne çıkanlar: {', '.join(reasons[:4])}",
-                f"Puan dökümü: {score_details}",
-                f"İlan: {listing['listing_url']}",
-                "",
+    text_filters = {
+        "city": city,
+        "district": district,
+        "neighborhood": neighborhood,
+        "transaction_type": transaction_type,
+        "property_type": property_type,
+        "room_count": room_count,
+    }
+    for column, selected_value in text_filters.items():
+        if selected_value and selected_value != "Tümü":
+            filtered = filtered[
+                filtered[column].fillna("").astype(str).eq(selected_value)
             ]
-        )
-    return "\n".join(lines)
+
+    numeric_columns = ["price", "net_m2", "gross_m2"]
+    for column in numeric_columns:
+        if column in filtered.columns:
+            filtered[column] = pd.to_numeric(filtered[column], errors="coerce")
+
+    if minimum_price > 0:
+        filtered = filtered[filtered["price"] >= minimum_price]
+    if maximum_price > 0:
+        filtered = filtered[filtered["price"] <= maximum_price]
+    if minimum_net_m2 > 0:
+        filtered = filtered[filtered["net_m2"] >= minimum_net_m2]
+
+    boolean_filters = {
+        "in_complex": in_complex,
+        "balcony": balcony,
+        "furnished": furnished,
+    }
+    for column, selected_value in boolean_filters.items():
+        if selected_value is not None:
+            normalized_values = (
+                filtered[column].fillna("unknown").astype(str).str.lower()
+            )
+            filtered = filtered[normalized_values.eq(selected_value)]
+
+    return filtered.sort_values("price", ascending=True)
 
 
-def apply_styles() -> None:
-    theme_type = getattr(st.context.theme, "type", "light")
-    if theme_type == "dark":
-        palette = {
-            "bg": "#111714",
-            "surface": "#18221E",
-            "sidebar": "#17211D",
-            "text": "#EDF6F2",
-            "muted": "#A8BBB2",
-            "primary": "#61D0A8",
-            "accent": "#FF9A78",
-            "border": "#34463E",
-            "shadow": "rgba(0, 0, 0, .24)",
-        }
+def optional_values(listings: pd.DataFrame, column: str) -> list[str]:
+    """Bir filtre kolonu için boş olmayan benzersiz seçenekleri döndürür."""
+    if column not in listings.columns:
+        return []
+    values = listings[column].dropna().astype(str).unique().tolist()
+    return sorted([v for v in values if v.strip() and v.lower() != "nan"])
+
+
+def mask_personal_data(text: str) -> str:
+    """AI servisine gitmeden önce e-posta ve telefonları maskeler."""
+    text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[E-POSTA]", text)
+    return re.sub(r"(?<!\d)(?:\+?90\s*)?0?5\d{2}(?:[\s.-]*\d{2,3}){3,4}(?!\d)", "[TELEFON]", text)
+
+
+def count_detected_criteria(criteria_data: dict) -> int:
+    ignored = {"sources", "analysis_method"}
+
+    def count(value, key="") -> int:
+        if key in ignored or value in (None, "", [], {}):
+            return 0
+        if isinstance(value, dict):
+            return sum(count(child, child_key) for child_key, child in value.items())
+        if isinstance(value, list):
+            return len(value)
+        return int(value is not False)
+
+    return count(criteria_data)
+
+
+def select_customer_example(text: str) -> None:
+    st.session_state["customer_request_input"] = text
+    st.session_state["search_performed"] = False
+
+
+def clear_ai_search() -> None:
+    st.session_state["customer_request_input"] = ""
+    st.session_state["search_performed"] = False
+    for key in ("ai_matches", "near_matches", "parsed_criteria", "parsed_criteria_obj", "analysis_warning"):
+        st.session_state.pop(key, None)
+
+
+def toggle_compare(listing_id: str) -> None:
+    selected = st.session_state.setdefault("compare_selected", [])
+    st.session_state.pop("compare_warning", None)
+    if listing_id in selected:
+        selected.remove(listing_id)
+    elif len(selected) < 4:
+        selected.append(listing_id)
     else:
-        palette = {
-            "bg": "#F7FAF8",
-            "surface": "#FFFFFF",
-            "sidebar": "#EAF2EE",
-            "text": "#17241F",
-            "muted": "#5B6C64",
-            "primary": "#17735A",
-            "accent": "#D75F3C",
-            "border": "#D4E1DB",
-            "shadow": "rgba(24, 55, 44, .08)",
-        }
-    st.markdown(
-        f"""
-        <style>
-        :root {{
-            --app-bg: {palette['bg']};
-            --app-surface: {palette['surface']};
-            --app-sidebar: {palette['sidebar']};
-            --app-text: {palette['text']};
-            --app-muted: {palette['muted']};
-            --app-primary: {palette['primary']};
-            --app-accent: {palette['accent']};
-            --app-border: {palette['border']};
-            --app-shadow: {palette['shadow']};
-        }}
-        .stApp {{
-            background: var(--app-bg);
-            color: var(--app-text);
-        }}
-        [data-testid="stHeader"] {{
-            background: color-mix(in srgb, var(--app-bg) 92%, transparent);
-            border-bottom: 1px solid var(--app-border);
-        }}
-        [data-testid="stSidebar"] {{
-            background: var(--app-sidebar);
-            border-right: 1px solid var(--app-border);
-        }}
-        [data-testid="stVerticalBlockBorderWrapper"] {{
-            background: var(--app-surface);
-            border: 1px solid var(--app-border);
-            border-radius: 8px;
-            box-shadow: 0 7px 22px var(--app-shadow);
-        }}
-        [data-testid="stMetric"] {{
-            background: transparent;
-            border-left: 3px solid var(--app-accent);
-            padding-left: 12px;
-        }}
-        [data-testid="stImage"] img {{ border-radius: 6px; }}
-        .app-kicker {{ color: var(--app-primary); font-size: 13px; font-weight: 750; }}
-        .app-kicker::before {{
-            content: "";
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            margin-right: 8px;
-            border-radius: 50%;
-            background: var(--app-accent);
-        }}
-        .match-score {{
-            color: var(--app-accent);
-            font-size: 24px;
-            font-weight: 780;
-        }}
-        .listing-meta {{
-            color: var(--app-muted);
-            font-size: 14px;
-        }}
-        .reason-tag {{
-            display: inline-block;
-            margin: 8px 5px 0 0;
-            padding: 4px 7px;
-            border: 1px solid var(--app-border);
-            border-radius: 4px;
-            background: color-mix(in srgb, var(--app-primary) 14%, var(--app-surface));
-            color: var(--app-text);
-            font-size: 12px;
-        }}
-        .stButton > button, .stLinkButton > a,
-        [data-testid="stFormSubmitButton"] > button {{
-            min-height: 42px;
-            border-radius: 6px;
-            font-weight: 700;
-        }}
-        [data-testid="stForm"] {{ border-color: var(--app-border); }}
-        [data-testid="stAlert"] {{ border: 1px solid var(--app-border); }}
-        h1, h2, h3, p, button, label {{ letter-spacing: 0 !important; }}
-        h1 {{ font-size: 32px !important; }}
-        h2 {{ font-size: 22px !important; }}
-        h3 {{ font-size: 18px !important; }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+        st.session_state["compare_warning"] = "En fazla 4 ilan karşılaştırabilirsiniz."
 
 
-def main() -> None:
-    st.set_page_config(page_title="Emlak Eşleştirici", page_icon=None, layout="wide")
-    apply_styles()
-    try:
-        listings, data_source = load_listings()
-    except Exception as error:
-        st.error(f"İlanlar yüklenemedi: {error}")
-        st.stop()
-    if listings.empty:
-        st.warning("Aktif ilan bulunamadı.")
-        st.stop()
-    districts = sorted(listings["district"].unique().tolist())
-    neighborhoods = sorted(listings["neighborhood"].unique().tolist())
-    rooms = sorted(listings["room_count"].unique().tolist())
-    property_types = sorted(listings["property_type"].unique().tolist())
+def sync_compare_picker() -> None:
+    st.session_state["compare_selected"] = st.session_state.get("compare_picker", [])[:4]
 
-    st.markdown('<div class="app-kicker">PORTFÖY EŞLEŞTİRME</div>', unsafe_allow_html=True)
-    st.title("Emlak Eşleştirici")
-    st.caption("Müşterinin aradığı evi portföy içinde hızlıca bulun.")
 
-    summary_columns = st.columns(3)
-    with summary_columns[0]:
-        st.metric("Aktif ilan", len(listings))
-    with summary_columns[1]:
-        st.metric("Bölge", listings["district"].nunique())
-    with summary_columns[2]:
-        average_price = int(listings["price"].mean())
-        st.metric("Ortalama fiyat", f"{average_price / 1_000_000:.1f} Mn TL")
+def has_real_listing_url(value: object) -> bool:
+    """Demo ve boş bağlantıları kullanıcıya gerçek ilan linki gibi göstermez."""
+    url = str(value or "").strip()
+    return url.startswith(("http://", "https://")) and "example.com" not in url.lower()
 
-    mode = st.radio(
-        "Kullanım modu",
-        ["Emlak danışmanı", "Müşteri"],
-        horizontal=True,
-        label_visibility="collapsed",
-    )
 
-    with st.form("property_search"):
-        request = st.text_area(
-            "Müşteri talebi",
-            placeholder="Başakşehir'de site içinde, balkonlu, 3+1 ve 8 milyon TL altı daire arıyorum.",
-            height=92,
+def resolve_listing_image(value: object) -> Path | None:
+    image_value = str(value or "").strip().replace("/", "\\")
+    if not image_value or image_value.startswith(("http://", "https://")):
+        return None
+    image_path = (Path(__file__).parent / image_value).resolve()
+    return image_path if image_path.is_file() else None
+
+
+def render_criteria_summary(criteria_data: dict) -> None:
+    """Ham JSON yerine danışmanın hızlıca doğrulayabileceği bir kriter özeti gösterir."""
+    location = criteria_data.get("location", {})
+    price = criteria_data.get("price", {})
+    area = criteria_data.get("area", {})
+    hard = criteria_data.get("hard_requirements", {})
+    soft = criteria_data.get("soft_preferences", {})
+    items = []
+
+    if location.get("city"):
+        items.append(("Şehir", location["city"]))
+    if location.get("district"):
+        items.append(("İlçe", location["district"]))
+    if location.get("neighborhoods"):
+        items.append(("Mahalle", ", ".join(location["neighborhoods"])))
+    if criteria_data.get("transaction_type"):
+        items.append(("İlan türü", criteria_data["transaction_type"]))
+    if criteria_data.get("property_type"):
+        items.append(("Gayrimenkul", criteria_data["property_type"]))
+    if criteria_data.get("room_count"):
+        items.append(("Oda", ", ".join(criteria_data["room_count"])))
+    if price.get("minimum") is not None:
+        items.append(("Minimum fiyat", f"{price['minimum']:,.0f} TL".replace(",", ".")))
+    if price.get("maximum") is not None:
+        items.append(("Maksimum fiyat", f"{price['maximum']:,.0f} TL".replace(",", ".")))
+    if area.get("minimum_net_m2") is not None:
+        items.append(("Minimum net alan", f"{area['minimum_net_m2']} m²"))
+
+    flag_labels = {
+        "in_complex": "Site içinde",
+        "balcony": "Balkon",
+        "furnished": "Eşyalı",
+        "near_metro": "Metro yakınlığı",
+    }
+    for key, label in flag_labels.items():
+        if hard.get(key) is not None:
+            items.append((f"Zorunlu · {label}", "Evet" if hard[key] else "Hayır"))
+        elif soft.get(key) is not None:
+            items.append((f"Tercih · {label}", "Evet" if soft[key] else "Hayır"))
+    for feature in criteria_data.get("desired_features", []):
+        items.append(("İstenen özellik", feature.title()))
+    for feature in criteria_data.get("excluded_features", []):
+        items.append(("İstenmeyen özellik", feature.title()))
+
+    if not items:
+        st.info("Metinden puanlanabilir bir emlak kriteri çıkarılamadı.")
+        return
+    columns = st.columns(min(3, len(items)))
+    for index, (label, value) in enumerate(items):
+        columns[index % len(columns)].metric(label, value)
+
+
+# --- SAYFA YAPILANDIRMASI VE CSS ---
+
+st.set_page_config(
+    page_title="AI Emlak İlan Eşleştirme & Portföy Zekası",
+    page_icon="🏠",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+st.markdown(
+    """
+    <style>
+    /* Genel Arayüz ve Kart Tasarımı */
+    .metric-card {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 16px;
+        color: #f8fafc;
+        margin-bottom: 12px;
+    }
+    .score-badge-high {
+        background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+        color: white;
+        padding: 6px 14px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 0.95rem;
+        display: inline-block;
+    }
+    .score-badge-med {
+        background: linear-gradient(135deg, #0284c7 0%, #38bdf8 100%);
+        color: white;
+        padding: 6px 14px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 0.95rem;
+        display: inline-block;
+    }
+    .score-badge-low {
+        background: linear-gradient(135deg, #d97706 0%, #f59e0b 100%);
+        color: white;
+        padding: 6px 14px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 0.95rem;
+        display: inline-block;
+    }
+    .pill-tag {
+        background-color: #334155;
+        color: #e2e8f0;
+        padding: 4px 10px;
+        border-radius: 12px;
+        font-size: 0.8rem;
+        margin-right: 6px;
+        display: inline-block;
+    }
+    .pitch-box {
+        background-color: #022c22;
+        border: 1px solid #059669;
+        border-radius: 10px;
+        padding: 16px;
+        color: #ecfdf5;
+        font-family: monospace;
+        white-space: pre-wrap;
+    }
+    .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+        margin: 8px 0 14px;
+    }
+    .kpi-item {
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(100, 116, 139, 0.28);
+        border-left: 4px solid #047857;
+        border-radius: 8px;
+        min-width: 0;
+        padding: 12px 14px;
+    }
+    .kpi-label {
+        color: var(--text-color);
+        font-size: 0.82rem;
+        opacity: 0.72;
+    }
+    .kpi-value {
+        color: var(--text-color);
+        font-size: 1.55rem;
+        line-height: 1.2;
+        margin-top: 6px;
+        overflow-wrap: anywhere;
+    }
+    @media (max-width: 700px) {
+        .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+        .kpi-item { padding: 10px; }
+        .kpi-value { font-size: 1.15rem; }
+        h1 { font-size: 2rem !important; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.session_state.setdefault("customer_request_input", "")
+st.session_state.setdefault("search_performed", False)
+st.session_state.setdefault("compare_selected", [])
+
+
+# --- YAN PANEL (SIDEBAR) ---
+
+with st.sidebar:
+    st.title("🏠 Portföy Zekası")
+    st.caption("AI Destekli Gayrimenkul Eşleştirme Sistemi")
+
+    # API Ayarları
+    with st.expander("⚙️ Gemini API Ayarları", expanded=False):
+        api_key_input = st.text_input(
+            "Gemini API Anahtarı",
+            type="password",
+            help="Boş bırakılırsa .env dosyasındaki anahtar veya akıllı yerel demo motoru kullanılır.",
         )
-        detailed_ai = st.toggle("AI ile detaylı analiz", value=True)
-        search_clicked = st.form_submit_button(
-            "Uygun ilanları bul",
-            type="primary",
+        model_choice = st.selectbox(
+            "Gemini Modeli",
+            FALLBACK_GEMINI_MODELS,
+            index=0,
+        )
+        if api_key_input:
+            st.session_state["custom_api_key"] = api_key_input
+        st.session_state["custom_model"] = model_choice
+
+    # Portföy Durum Özeti
+    listings_data = get_listings_df()
+    active_df = listings_data[
+        listings_data["status"].fillna("").astype(str).str.lower().eq("active")
+    ]
+    
+    st.divider()
+    st.subheader("📊 Portföy Özeti")
+    col_sb1, col_sb2 = st.columns(2)
+    col_sb1.metric("Aktif İlan", len(active_df))
+    sidebar_sale_count = active_df["transaction_type"].eq("Satılık").sum()
+    sidebar_rent_count = active_df["transaction_type"].eq("Kiralık").sum()
+    col_sb2.metric("Satılık / Kiralık", f"{sidebar_sale_count} / {sidebar_rent_count}")
+
+    st.divider()
+    st.subheader("⚡ Hızlı Müşteri Senaryoları")
+    st.caption("Danışman senaryolarını tek tıkla test edin:")
+    for persona_name, persona_text in SAMPLE_PERSONAS.items():
+        st.button(
+            persona_name,
             width="stretch",
+            on_click=select_customer_example,
+            args=(persona_text,),
         )
 
-    load_dotenv(ENV_FILE, override=True)
-    gemini_enabled = setting("ENABLE_GEMINI", "true").lower() == "true"
-    gemini_key = setting("GEMINI_API_KEY")
-    if search_clicked and request:
-        if detailed_ai and gemini_enabled and gemini_key:
-            try:
-                with st.spinner(f"Talep analiz ediliyor ({GEMINI_MODEL})..."):
-                    ai_criteria = analyze_request(
-                        gemini_key,
-                        request,
-                        tuple(districts),
-                        tuple(rooms),
-                    )
-                parsed = ai_criteria.model_dump(exclude_none=True)
-                st.session_state["criteria_source"] = "Gemini"
-                st.session_state["search_notice"] = "Talep Gemini ile analiz edildi ve ilanlar yeniden sıralandı."
-            except Exception as error:
-                st.warning(f"AI analizi kullanılamadı, yerel analiz uygulandı: {error}")
-                parsed = parse_request(request, districts, neighborhoods, property_types)
-                st.session_state["criteria_source"] = "Yerel"
-                st.session_state["search_notice"] = "Talep hızlı arama ile analiz edildi ve ilanlar yeniden sıralandı."
+
+if "compare_selected" not in st.session_state:
+    st.session_state["compare_selected"] = []
+
+sale_df = active_df[active_df["transaction_type"].eq("Satılık")].copy()
+rent_df = active_df[active_df["transaction_type"].eq("Kiralık")].copy()
+sale_prices = pd.to_numeric(sale_df.get("price"), errors="coerce").dropna()
+rent_prices = pd.to_numeric(rent_df.get("price"), errors="coerce").dropna()
+roi_values = pd.to_numeric(sale_df.get("roi_years"), errors="coerce").dropna()
+
+st.title("Emlak Zekası & Portföy Eşleştirme Portalı")
+sale_average_text = f"{sale_prices.mean() / 1_000_000:.1f} Mn TL" if not sale_prices.empty else "Veri yok"
+rent_average_text = f"{rent_prices.mean():,.0f} TL".replace(",", ".") if not rent_prices.empty else "Veri yok"
+roi_average_text = f"{roi_values.mean():.1f} yıl" if not roi_values.empty else "Veri yok"
+st.markdown(
+    f"""
+    <div class="kpi-grid">
+      <div class="kpi-item"><div class="kpi-label">Aktif ilan</div><div class="kpi-value">{len(active_df)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Satılık / Kiralık</div><div class="kpi-value">{len(sale_df)} / {len(rent_df)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Ort. satış</div><div class="kpi-value">{sale_average_text}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Ort. kira</div><div class="kpi-value">{rent_average_text}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Ort. amortisman</div><div class="kpi-value">{roi_average_text}</div></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+data_updated_at = time.strftime("%d.%m.%Y %H:%M", time.localtime(DATA_FILE.stat().st_mtime)) if DATA_FILE.exists() else "Bilinmiyor"
+st.caption(
+    f"Veri kaynağı: örnek portföy CSV · Son güncelleme: {data_updated_at} · "
+    "Fiyat, kira ve getiri hesapları tahminidir; yatırım tavsiyesi değildir."
+)
+
+
+# --- ANA SEKMELER ---
+
+tab_ai, tab_manual, tab_compare, tab_portfolio, tab_analytics = st.tabs(
+    [
+        "🤖 AI Eşleştirme",
+        "🔍 İlanlar",
+        f"⚖️ Karşılaştır ({len(st.session_state['compare_selected'])})",
+        "➕ Portföy",
+        "📈 Piyasa",
+    ]
+)
+
+
+# ==========================================
+# SEKME 1: AI AKILLI EŞLEŞTİRME & WHATSAPP
+# ==========================================
+with tab_ai:
+    st.subheader("🎯 Doğal Dil ile Müşteri Talebi Eşleştirme")
+    st.write(
+        "Müşterinizin WhatsApp veya telefon görüşmesinde söylediği talebi doğrudan yapıştırın. "
+        "Yapay zeka kriterleri otomatik çıkarıp en uygun portföyleri gerekçeleriyle sunar."
+    )
+
+    customer_request = st.text_area(
+        "Müşteri Talebi Metni",
+        key="customer_request_input",
+        placeholder="Örn: Başakşehir'de 3+1, 8.5 milyona kadar, site içi, metroya yürüme mesafesinde...",
+        height=110,
+    )
+
+    col_btn1, col_btn2 = st.columns([4, 1])
+    with col_btn1:
+        search_clicked = st.button("🚀 Akıllı İlanları Eşleştir", type="primary", width="stretch")
+    with col_btn2:
+        st.button("🧹 Temizle", width="stretch", on_click=clear_ai_search)
+
+    if search_clicked:
+        clean_request = customer_request.strip()
+        if len(clean_request) < 10:
+            st.warning("Lütfen en az 10 karakterlik bir müşteri talebi girin veya örnek senaryolardan birini seçin.")
         else:
-            parsed = parse_request(request, districts, neighborhoods, property_types)
-            st.session_state["criteria_source"] = "Yerel"
-            st.session_state["search_notice"] = "Talep hızlı arama ile analiz edildi ve ilanlar yeniden sıralandı."
-        st.session_state["parsed_criteria"] = parsed
-        st.session_state["parsed_request"] = request
-    elif st.session_state.get("parsed_request") == request:
-        parsed = st.session_state.get("parsed_criteria", {})
-    else:
-        parsed = parse_request(request, districts, neighborhoods, property_types)
-
-    if request and st.session_state.get("parsed_request") == request:
-        st.success(st.session_state.get("search_notice", "İlanlar yeniden sıralandı."))
-
-    default_districts = normalize_option_values(parsed.get("district", []), districts)
-    default_rooms = normalize_option_values(parsed.get("room_count", []), rooms)
-    default_neighborhoods = normalize_option_values(
-        parsed.get("neighborhood", []), neighborhoods
-    )
-    default_property_types = normalize_option_values(
-        parsed.get("property_type", []), property_types
-    )
-
-    with st.sidebar:
-        st.header("Arama kriterleri")
-        st.caption(f"Portföy kaynağı: {data_source}")
-        if st.button("İlanları yenile", help="Google Sheet'teki son değişiklikleri yükler"):
-            st.cache_data.clear()
-            st.rerun()
-        max_price = st.number_input(
-            "Maksimum bütçe (TL)",
-            min_value=1_000_000,
-            max_value=100_000_000,
-            value=int(parsed.get("max_price", 10_000_000)),
-            step=250_000,
-        )
-        selected_districts = st.multiselect(
-            "İlçe", districts, default=default_districts, placeholder="İlçe seçin"
-        )
-        selected_neighborhoods = st.multiselect(
-            "Mahalle",
-            neighborhoods,
-            default=default_neighborhoods,
-            placeholder="Mahalle seçin",
-        )
-        selected_rooms = st.multiselect(
-            "Oda sayısı", rooms, default=default_rooms, placeholder="Oda seçin"
-        )
-        selected_property_types = st.multiselect(
-            "Konut tipi",
-            property_types,
-            default=default_property_types,
-            placeholder="Konut tipi seçin",
-        )
-        min_gross_m2 = st.number_input(
-            "Minimum brüt m²",
-            min_value=0,
-            max_value=1_000,
-            value=int(parsed.get("min_gross_m2", 0)),
-            step=5,
-        )
-        st.subheader("Olmazsa olmazlar")
-        balcony = st.checkbox("Balkon", value=bool(parsed.get("balcony")))
-        in_complex = st.checkbox("Site içinde", value=bool(parsed.get("in_complex")))
-        near_metro = st.checkbox("Metroya yakın", value=bool(parsed.get("near_metro")))
-        result_limit = st.slider("Gösterilecek ilan", 5, 30, 8, 1)
-
-    effective_max_price = int(parsed.get("max_price", max_price))
-    effective_districts = default_districts or selected_districts
-    effective_neighborhoods = default_neighborhoods or selected_neighborhoods
-    effective_rooms = default_rooms or selected_rooms
-    effective_property_types = default_property_types or selected_property_types
-    effective_min_gross_m2 = int(parsed.get("min_gross_m2", min_gross_m2))
-    effective_balcony = balcony or bool(parsed.get("balcony"))
-    effective_in_complex = in_complex or bool(parsed.get("in_complex"))
-    effective_near_metro = near_metro or bool(parsed.get("near_metro"))
-    required_features = [
-        str(value).strip()
-        for value in parsed.get("must_have", [])
-        if str(value).strip()
-    ]
-    preferred_features = [
-        str(value).strip()
-        for value in parsed.get("nice_to_have", [])
-        if str(value).strip()
-    ]
-    requested_features = list(dict.fromkeys(required_features + preferred_features))
-
-    if request and parsed:
-        detected_labels: list[str] = []
-        if "max_price" in parsed:
-            detected_labels.append(f"bütçe: {format_price(effective_max_price)}")
-        if effective_districts:
-            detected_labels.append(f"ilçe: {', '.join(effective_districts)}")
-        if effective_rooms:
-            detected_labels.append(f"oda: {', '.join(effective_rooms)}")
-        if effective_neighborhoods:
-            detected_labels.append(f"mahalle: {', '.join(effective_neighborhoods)}")
-        if effective_min_gross_m2:
-            detected_labels.append(f"min: {effective_min_gross_m2} m²")
-        if requested_features:
-            detected_labels.append(f"özellik: {', '.join(requested_features)}")
-        source = st.session_state.get("criteria_source", "Yerel")
-        st.caption(
-            f"Talepte algılanan kriterler ({source}): " + " · ".join(detected_labels)
-        )
-
-    scored: list[tuple[int, list[str], list[dict[str, object]], pd.Series]] = []
-    closest: list[tuple[int, list[str], list[dict[str, object]], pd.Series]] = []
-    for _, listing in listings.iterrows():
-        score, reasons, breakdown = score_listing(
-            listing,
-            effective_max_price,
-            effective_districts,
-            effective_neighborhoods,
-            effective_rooms,
-            effective_property_types,
-            effective_min_gross_m2,
-            effective_balcony,
-            effective_in_complex,
-            effective_near_metro,
-            requested_features,
-        )
-        candidate = (score, reasons, breakdown, listing)
-        closest.append(candidate)
-        if listing_matches_required_criteria(
-            listing,
-            effective_max_price,
-            effective_districts,
-            effective_neighborhoods,
-            effective_rooms,
-            effective_property_types,
-            effective_min_gross_m2,
-            effective_balcony,
-            effective_in_complex,
-            effective_near_metro,
-            required_features,
-        ):
-            scored.append(candidate)
-    scored.sort(key=lambda item: item[0], reverse=True)
-    closest.sort(key=lambda item: item[0], reverse=True)
-    showing_closest = not scored and bool(request)
-    if showing_closest:
-        scored = closest
-    top_matches = scored[:result_limit]
-
-    heading = "En yakın alternatifler" if showing_closest else "Eşleşen ilanlar"
-    st.subheader(f"{heading} ({len(scored)})")
-    if showing_closest:
-        st.warning("Tüm zorunlu kriterleri aynı anda karşılayan ilan yok; en yakın alternatifler gösteriliyor.")
-    if not top_matches:
-        st.warning("Bu kriterlerin tamamına uyan aktif ilan bulunamadı.")
-    selected_matches: list[tuple[int, list[str], list[dict[str, object]], pd.Series]] = []
-    for score, reasons, breakdown, listing in top_matches:
-        with st.container(border=True):
-            image_column, detail_column, action_column = st.columns([1.15, 2.4, 0.8])
-            with image_column:
-                image_source = str(listing["image_url"])
-                if not image_source.lower().startswith(("http://", "https://")):
-                    image_source = str(APP_DIR / image_source)
-                st.image(image_source, width="stretch")
-            with detail_column:
-                st.markdown(f"### {listing['title']}")
-                st.markdown(
-                    f'<div class="listing-meta">{listing["district"]} / {listing["neighborhood"]} · '
-                    f'{listing["room_count"]} · {listing["gross_m2"]} m² brüt · '
-                    f'{listing.get("net_m2", 0)} m² net</div>',
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    f"**{listing.get('floor', '-')} / {listing.get('total_floors', '-')} kat** · "
-                    f"{listing.get('bathroom_count', '-')} banyo · "
-                    f"{listing.get('heating', '-')} · {listing.get('facade', '-')} cephe"
-                )
-                st.write(listing["description"])
-                highlight = str(listing.get("highlight", "")).strip()
-                if highlight and highlight.lower() != "nan":
-                    st.markdown(f"**Bu evin avantajı:** {highlight}")
-                if reasons:
-                    reason_html = "".join(
-                        f'<span class="reason-tag">{reason}</span>' for reason in reasons[:4]
+            api_key = st.session_state.get("custom_api_key")
+            model = st.session_state.get("custom_model", DEFAULT_GEMINI_MODEL)
+            started_at = time.perf_counter()
+            with st.spinner("AI müşteri talebini analiz ediyor ve portföy taranıyor..."):
+                try:
+                    parsed = parse_customer_request(
+                        mask_personal_data(clean_request),
+                        api_key=api_key,
+                        model_name=model,
+                        allow_fallback=True,
                     )
-                    st.markdown(reason_html, unsafe_allow_html=True)
-                else:
-                    st.caption("Kriterlerle sınırlı eşleşme")
-                with st.expander("Tüm ilan detayları"):
-                    details_left, details_right = st.columns(2)
-                    with details_left:
-                        st.markdown(
-                            f"**Konut ve bina**  \n"
-                            f"Bina yaşı: {listing.get('building_age', '-')}  \n"
-                            f"Mutfak: {listing.get('kitchen_type', '-')}  \n"
-                            f"Açık alan: {listing.get('outdoor_space', '-')}  \n"
-                            f"Manzara: {listing.get('view', '-')}  \n"
-                            f"Otopark: {listing.get('parking', '-')}  \n"
-                            f"Asansör: {'Var' if listing.get('elevator') else 'Yok'}"
+                    parsed_data = parsed.model_dump(mode="json")
+                    st.session_state["parsed_criteria"] = parsed_data
+                    st.session_state["parsed_criteria_obj"] = parsed
+                    if count_detected_criteria(parsed_data) == 0:
+                        st.session_state["ai_matches"] = []
+                        st.session_state["near_matches"] = []
+                        st.session_state["analysis_warning"] = (
+                            "Talepte puanlanabilir bir kriter bulunamadı. Konum, oda, bütçe veya istediğiniz özelliklerden en az birini yazın."
                         )
-                    with details_right:
-                        st.markdown(
-                            f"**Mülkiyet ve kullanım**  \n"
-                            f"Tapu: {listing.get('deed_status', '-')}  \n"
-                            f"Kredi: {'Uygun' if listing.get('credit_eligible') else 'Uygun değil'}  \n"
-                            f"Kullanım: {listing.get('usage_status', '-')}  \n"
-                            f"Eşyalı: {'Evet' if listing.get('furnished') else 'Hayır'}  \n"
-                            f"Aidat: {format_price(int(listing.get('dues', 0)))}  \n"
-                            f"Güvenlik: {listing.get('security', '-')}"
-                        )
-                    st.markdown(f"**Site olanakları:** {listing.get('amenities', '-')}")
-                    st.markdown(f"**Yakın çevre:** {listing.get('nearby_places', '-')}")
-                    st.markdown(f"**Teknik donanım:** {listing.get('technical_details', '-')}")
-                    st.markdown("**Bina özellikleri**")
-                    building_features = [
-                        feature.strip()
-                        for feature in str(listing.get("building_features", "")).split(";")
-                        if feature.strip()
-                    ]
-                    for feature in building_features:
-                        st.markdown(f"- {feature}")
-                with st.expander("Eşleşme hesabı"):
-                    for criterion in breakdown:
-                        ratio = float(criterion["earned"]) / float(criterion["possible"])
-                        st.progress(
-                            ratio,
-                            text=(
-                                f"{criterion['label']}: "
-                                f"{criterion['earned']:.0f}/{criterion['possible']} puan · "
-                                f"{criterion['detail']}"
-                            ),
-                        )
-            with action_column:
-                st.markdown(f'<div class="match-score">%{score}</div>', unsafe_allow_html=True)
-                st.caption("eşleşme")
-                st.markdown(f"**{format_price(int(listing['price']))}**")
-                st.link_button("İlanı aç", listing["listing_url"], width="stretch")
-                selected = st.checkbox(
-                    "Kısa liste",
-                    key=f"shortlist_{listing['listing_id']}",
-                )
-                if selected:
-                    selected_matches.append((score, reasons, breakdown, listing))
+                    else:
+                        st.session_state.pop("analysis_warning", None)
+                        st.session_state["ai_matches"] = match_listings(active_df, parsed)
+                        st.session_state["near_matches"] = find_near_matches(active_df, parsed)
+                    st.session_state["search_performed"] = True
+                    st.session_state["analysis_elapsed"] = time.perf_counter() - started_at
+                    st.session_state["analysis_method"] = parsed.analysis_method
+                except CriteriaParserError as err:
+                    st.error(str(err))
 
-    if selected_matches:
-        report = build_customer_report(request, selected_matches)
-        st.markdown(f"**Kısa liste: {len(selected_matches)} ilan**")
-        st.download_button(
-            "Müşteri özetini indir",
-            data=report.encode("utf-8-sig"),
-            file_name="musteri_ilan_onerileri.txt",
-            mime="text/plain",
-            width="stretch",
+    if st.session_state.get("search_performed"):
+        criteria_count = count_detected_criteria(st.session_state.get("parsed_criteria", {}))
+        elapsed = st.session_state.get("analysis_elapsed", 0.0)
+        method = st.session_state.get("analysis_method", "Kural motoru")
+        st.success(
+            f"{criteria_count} kriter çıkarıldı · {len(active_df)} ilan değerlendirildi · "
+            f"{elapsed:.1f} saniyede hazırlandı · Yöntem: {method}"
         )
+        if st.session_state.get("analysis_warning"):
+            st.warning(st.session_state["analysis_warning"])
 
-    st.caption(f"Mod: {mode}. Eşleşme puanı öneridir; nihai değerlendirme emlak danışmanına aittir.")
+    # Kriterler Özeti
+    if st.session_state.get("search_performed") and "parsed_criteria" in st.session_state:
+        criteria_data = st.session_state["parsed_criteria"]
+        with st.expander("📋 AI Tarafından Algılanan Kriter Özeti", expanded=False):
+            render_criteria_summary(criteria_data)
+            with st.expander("Teknik kriter verisini göster", expanded=False):
+                st.json(criteria_data)
+
+    # Eşleşme Sonuçları
+    if st.session_state.get("search_performed") and "ai_matches" in st.session_state:
+        matches = st.session_state["ai_matches"]
+        near_matches = st.session_state.get("near_matches", [])
+
+        st.divider()
+        col_res1, col_res2 = st.columns([3, 1])
+        with col_res1:
+            st.subheader(f"✨ Bulunan Eşleşmeler ({len(matches)} İlan)")
+        with col_res2:
+            result_limit = st.selectbox("Gösterilecek Sonuç", [3, 5, 10, "Tümü"], index=1)
+            limit_count = len(matches) if result_limit == "Tümü" else int(result_limit)
+
+        if not matches:
+            st.warning("⚠️ Kesin kriterlerin tamamına uyan aktif ilan bulunamadı.")
+        else:
+            if "compare_selected" not in st.session_state:
+                st.session_state["compare_selected"] = []
+
+            for idx, listing in enumerate(matches[:limit_count]):
+                score = listing.get("match_score", 0)
+                if score >= 85:
+                    badge_html = f"<span class='score-badge-high'>%{score} Mükemmel Uyum</span>"
+                elif score >= 70:
+                    badge_html = f"<span class='score-badge-med'>%{score} Güçlü Eşleşme</span>"
+                else:
+                    badge_html = f"<span class='score-badge-low'>%{score} Kısmi Uyum</span>"
+
+                price_num = float(listing["price"])
+                price_str = f"{price_num:,.0f} TL".replace(",", ".")
+                price_m2_str = f"{listing.get('price_per_net_m2', 0):,.0f} TL/m²".replace(",", ".")
+
+                with st.container(border=True):
+                    col_t0, col_t1, col_t2 = st.columns([1.1, 2.6, 1])
+                    with col_t0:
+                        local_image = resolve_listing_image(listing.get("image_url"))
+                        if local_image:
+                            st.image(str(local_image), caption=listing["title"], width="stretch")
+                    with col_t1:
+                        st.markdown(f"### {listing['title']} &nbsp; {badge_html}", unsafe_allow_html=True)
+                        st.caption(
+                            f"{listing.get('transaction_type', '')} · {listing.get('property_type', '')} · "
+                            f"İlan No: `{listing['listing_id']}` · {listing['neighborhood']}, {listing['district']}"
+                        )
+                    with col_t2:
+                        st.metric("Fiyat", price_str)
+
+                    # Metrikler
+                    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                    col_m1.metric("Oda & Alan", f"{listing['room_count']} • {listing['net_m2']} m²")
+                    col_m2.metric("m² Birim Fiyatı", price_m2_str)
+                    col_m3.metric("Bina Yaşı / Kat", f"{listing.get('building_age', '-')} yaş • Kat: {listing.get('floor', '-')}")
+                    est_rent = listing.get("estimated_monthly_rent", 0)
+                    col_m4.metric("Tahmini Kira", f"{est_rent:,.0f} TL/ay".replace(",", "."))
+
+                    # Rozetler
+                    tags_html = []
+                    if normalize_boolean(listing.get("in_complex")) is True:
+                        tags_html.append("<span class='pill-tag'>🏢 Site İçerisinde</span>")
+                    if normalize_boolean(listing.get("balcony")) is True:
+                        tags_html.append("<span class='pill-tag'>🪴 Balkonlu</span>")
+                    if normalize_boolean(listing.get("furnished")) is True:
+                        tags_html.append("<span class='pill-tag'>🛋️ Eşyalı</span>")
+                    if listing.get("transport_notes"):
+                        tags_html.append(f"<span class='pill-tag'>🚇 {listing['transport_notes']}</span>")
+
+                    if tags_html:
+                        st.markdown("".join(tags_html), unsafe_allow_html=True)
+
+                    st.markdown("**✨ Neden Bu İlan Uygun?**")
+                    for reason in listing.get("match_reasons", []):
+                        st.write(f"✓ {reason}")
+
+                    missing = listing.get("missing_information", [])
+                    if missing:
+                        for m_info in missing:
+                            st.caption(f"⚠️ Bilgi: {m_info}")
+
+                    with st.expander("Tüm ilan ayrıntıları ve 10 maddelik bina özellikleri", expanded=False):
+                        detail_left, detail_right = st.columns(2)
+                        with detail_left:
+                            st.write(f"**Brüt / net alan:** {listing.get('gross_m2', '-')} / {listing.get('net_m2', '-')} m²")
+                            st.write(f"**Banyo:** {listing.get('bathroom_count', '-')} · **Isıtma:** {listing.get('heating', '-')}")
+                            st.write(f"**Cephe / manzara:** {listing.get('facade', '-')} · {listing.get('view', '-')}")
+                            st.write(f"**Otopark:** {listing.get('parking', '-')}")
+                            st.write(f"**Tapu / iskan:** {listing.get('deed_status', '-')} · {listing.get('iskan_status', '-')}")
+                        with detail_right:
+                            st.write(f"**Öne çıkan avantaj:** {listing.get('highlight', '-')}")
+                            st.write(f"**Artılar:** {listing.get('pros', '-')}")
+                            st.write(f"**Dikkat noktaları:** {listing.get('cons', '-')}")
+                            st.write(f"**Yakın çevre:** {listing.get('transport_notes', '-')}")
+                        st.markdown("**Bina özellikleri**")
+                        st.text(str(listing.get("building_features") or "Bilgi bulunmuyor"))
+
+                    # Butonlar
+                    col_act1, col_act2 = st.columns([1, 1])
+                    with col_act1:
+                        if has_real_listing_url(listing.get("listing_url")):
+                            st.link_button("🌐 İlan Sayfasına Git", listing["listing_url"], width="stretch")
+                        else:
+                            st.button("Demo ilanı · dış bağlantı yok", disabled=True, width="stretch", key=f"demo_{listing['listing_id']}_{idx}")
+                    with col_act2:
+                        lid = listing["listing_id"]
+                        is_selected = lid in st.session_state["compare_selected"]
+                        st.button(
+                            "Karşılaştırmadan çıkar" if is_selected else "⚖️ Karşılaştır",
+                            width="stretch",
+                            key=f"comp_{lid}_{idx}",
+                            on_click=toggle_compare,
+                            args=(lid,),
+                        )
+
+        # --- YAKIN EŞLEŞMELER (SMART RELAXATION) ---
+        if near_matches:
+            with st.expander(f"💡 Akıllı Esnetme & Alternatif Fırsatlar ({len(near_matches)} İlan)", expanded=False):
+                st.info(
+                    "Müşterinizin bütçesini hafifçe (%5-15) esnettiğinizde veya alternatif lokasyonlarda "
+                    "kaçırılmaması gereken şu fırsatlar bulunuyor:"
+                )
+                for near in near_matches:
+                    with st.container(border=True):
+                        n_price = float(near["price"])
+                        st.write(f"**{near['title']}** — **{n_price:,.0f} TL** ({near['room_count']}, {near['net_m2']} m²)".replace(",", "."))
+                        for note in near.get("relaxation_notes", []):
+                            st.markdown(f"🔸 *{note}*")
+                        if near.get("match_reasons"):
+                            st.caption("Avantajlar: " + " • ".join(near["match_reasons"][:2]))
+
+        # --- WHATSAPP VE MÜŞTERİ SUNUMU ---
+        if matches:
+            st.divider()
+            st.subheader("📲 Müşteri WhatsApp Sunum Oluşturucu")
+            st.write("Eşleşen en iyi ilanları tek tıkla müşterinize gönderebileceğiniz şık bir WhatsApp mesajına dönüştürün.")
+
+            col_w1, col_w2, col_w3 = st.columns([2, 2, 2])
+            with col_w1:
+                client_name_in = st.text_input("Müşteri Adı / Hitap", value="Ahmet Bey")
+            with col_w2:
+                consultant_name_in = st.text_input("Danışman Adınız", value="Emlak Danışmanınız")
+            with col_w3:
+                client_phone_in = st.text_input("Müşteri Telefon No (Opsiyonel)", placeholder="905xxxxxxxxx")
+
+            pitch_text = generate_client_pitch(
+                matches,
+                client_name=client_name_in or "Değerli Müşterimiz",
+                consultant_name=consultant_name_in or "Emlak Danışmanınız",
+            )
+
+            st.text_area("Hazırlanan WhatsApp Mesajı", value=pitch_text, height=220)
+
+            wa_url = get_whatsapp_share_url(pitch_text, client_phone_in)
+            st.link_button("💬 WhatsApp ile Hemen Gönder", wa_url, type="primary", width="stretch")
 
 
-if __name__ == "__main__":
-    main()
+# ==========================================
+# SEKME 2: MANUEL DETAYLI ARAMA
+# ==========================================
+with tab_manual:
+    st.subheader("🔍 Kriter Bazlı Manuel Portföy Arama")
+    
+    with st.form("manual_search_form"):
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            m_city = st.selectbox("Şehir", ["Tümü", *optional_values(active_df, "city")])
+            m_district = st.selectbox("İlçe", ["Tümü", *optional_values(active_df, "district")])
+            m_neighborhood = st.selectbox("Mahalle", ["Tümü", *optional_values(active_df, "neighborhood")])
+        with col_m2:
+            m_transaction = st.selectbox("İlan Türü", ["Tümü", *optional_values(active_df, "transaction_type")])
+            m_type = st.selectbox("Emlak Tipi", ["Tümü", *optional_values(active_df, "property_type")])
+            m_room = st.selectbox("Oda Sayısı", ["Tümü", *optional_values(active_df, "room_count")])
+            m_complex = st.selectbox("Site İçerisinde", list(BOOLEAN_FILTER_OPTIONS.keys()))
+        with col_m3:
+            m_min_price = st.number_input("Min Fiyat (TL)", min_value=0, step=250_000)
+            m_max_price = st.number_input("Max Fiyat (TL)", min_value=0, step=250_000, help="0 değeri üst fiyat sınırı uygulanmayacağı anlamına gelir.")
+            m_min_m2 = st.number_input("Min Net m²", min_value=0, step=10)
+            m_balcony = st.selectbox("Balkon", list(BOOLEAN_FILTER_OPTIONS.keys()))
+            m_furnished = st.selectbox("Eşyalı", list(BOOLEAN_FILTER_OPTIONS.keys()))
+
+        manual_submit = st.form_submit_button("Filtrele ve İlanları Listele", type="primary", width="stretch")
+
+    manual_results = filter_manual_listings(
+        listings=listings_data,
+        city=None if m_city == "Tümü" else m_city,
+        district=None if m_district == "Tümü" else m_district,
+        neighborhood=None if m_neighborhood == "Tümü" else m_neighborhood,
+        transaction_type=None if m_transaction == "Tümü" else m_transaction,
+        property_type=None if m_type == "Tümü" else m_type,
+        room_count=None if m_room == "Tümü" else m_room,
+        minimum_price=int(m_min_price),
+        maximum_price=int(m_max_price),
+        minimum_net_m2=int(m_min_m2),
+        in_complex=BOOLEAN_FILTER_OPTIONS[m_complex],
+        balcony=BOOLEAN_FILTER_OPTIONS[m_balcony],
+        furnished=BOOLEAN_FILTER_OPTIONS[m_furnished],
+        status="active",
+    )
+
+    st.write(f"**Toplam Bulunan:** {len(manual_results)} aktif ilan")
+    if not manual_results.empty:
+        display_cols = [
+            "listing_id",
+            "title",
+            "neighborhood",
+            "room_count",
+            "price",
+            "net_m2",
+            "in_complex",
+            "balcony",
+            "transport_notes",
+        ]
+        st.dataframe(
+            manual_results[display_cols],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "listing_id": "İlan No",
+                "title": "Başlık",
+                "neighborhood": "Mahalle",
+                "room_count": "Oda",
+                "price": st.column_config.NumberColumn("Fiyat", format="%d TL"),
+                "net_m2": "Net m²",
+                "in_complex": "Site",
+                "balcony": "Balkon",
+                "transport_notes": "Ulaşım",
+            },
+        )
+        csv_bytes = manual_results.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Sonuçları CSV İndir", csv_bytes, "filtrelenmis_ilanlar.csv", "text/csv")
+
+
+# ==========================================
+# SEKME 3: İLAN KARŞILAŞTIRMA MATRİSİ
+# ==========================================
+with tab_compare:
+    st.subheader("⚖️ İlan Karşılaştırma Matrisi")
+    st.write("Müşterinize alternatif sunarken veya karar verme aşamasında 2-4 ilanı yan yana kıyaslayın.")
+
+    all_active_ids = active_df["listing_id"].tolist()
+    pre_selected = [lid for lid in st.session_state.get("compare_selected", []) if lid in all_active_ids]
+    if st.session_state.get("compare_picker") != pre_selected[:4]:
+        st.session_state["compare_picker"] = pre_selected[:4]
+
+    selected_ids = st.multiselect(
+        "Karşılaştırılacak İlanları Seçin:",
+        options=all_active_ids,
+        max_selections=4,
+        key="compare_picker",
+        on_change=sync_compare_picker,
+        format_func=lambda x: f"{x} - {active_df[active_df['listing_id'] == x]['title'].values[0]}" if not active_df[active_df['listing_id'] == x].empty else x,
+    )
+
+    if st.session_state.pop("compare_warning", None):
+        st.warning("En fazla 4 ilan karşılaştırabilirsiniz.")
+
+    if len(selected_ids) < 2:
+        st.info("Kıyaslama yapabilmek için lütfen en az 2 ilan seçin (AI Eşleştirme sekmesindeki kutucukları da kullanabilirsiniz).")
+    else:
+        comp_df = active_df[active_df["listing_id"].isin(selected_ids)].copy()
+        
+        # Karşılaştırma kolonları
+        cols = st.columns(len(selected_ids))
+        for i, (_, row) in enumerate(comp_df.iterrows()):
+            with cols[i]:
+                price_f = float(row["price"])
+                net_m2_f = float(row["net_m2"]) if pd.notna(row["net_m2"]) else 1
+                gross_m2_f = float(row["gross_m2"]) if pd.notna(row["gross_m2"]) else 1
+                m2_price = price_f / net_m2_f
+                efficiency = (net_m2_f / gross_m2_f) * 100 if gross_m2_f > 0 else 0
+
+                with st.container(border=True):
+                    st.subheader(row["title"])
+                    st.caption(f"İlan No: `{row['listing_id']}`")
+                    st.metric("Fiyat", f"{price_f:,.0f} TL".replace(",", "."))
+                    st.metric("m² Birim Fiyatı", f"{m2_price:,.0f} TL/m²".replace(",", "."))
+                    st.write(f"📍 **Konum:** {row['neighborhood']} / {row['district']}")
+                    st.write(f"📐 **Alan:** {row['net_m2']} m² Net / {row['gross_m2']} m² Brüt")
+                    st.write(f"📊 **Net/Brüt Verim:** %{efficiency:.1f}")
+                    st.write(f"🚪 **Oda:** {row['room_count']}")
+                    st.write(f"🏢 **Bina Yaşı / Kat:** {row.get('building_age', '-')} yaş • Kat: {row.get('floor', '-')}")
+                    st.write(f"🔥 **Isıtma:** {row.get('heating', '-')}")
+                    st.write(f"🪴 **Balkon:** {'Evet' if normalize_boolean(row.get('balcony')) else 'Hayır'}")
+                    st.write(f"🛡️ **Site İçi:** {'Evet' if normalize_boolean(row.get('in_complex')) else 'Hayır'}")
+                    st.write(f"🚇 **Ulaşım:** {row.get('transport_notes', '-')}")
+
+
+# ==========================================
+# SEKME 4: PORTFÖY YÖNETİMİ & YENİ İLAN
+# ==========================================
+with tab_portfolio:
+    st.subheader("➕ Portföy Yönetimi ve Yeni İlan Ekleme")
+    st.write("Veritabanına anında yeni bir portföy ekleyin veya mevcut ilanları yönetin.")
+
+    with st.expander("📝 Yeni İlan Ekle", expanded=False):
+        with st.form("add_listing_form"):
+            col_a1, col_a2, col_a3 = st.columns(3)
+            with col_a1:
+                new_id = st.text_input("İlan No *", value=f"PRT{len(listings_data) + 1:03d}")
+                new_title = st.text_input("Başlık *", placeholder="Örn: Kayaşehir Yeni Projede 3+1 Daire")
+                new_city = st.text_input("Şehir", value="İstanbul")
+                new_district = st.text_input("İlçe", value="Başakşehir")
+                new_neighborhood = st.text_input("Mahalle *", placeholder="Kayabaşı")
+            with col_a2:
+                new_transaction = st.selectbox("İlan Türü", ["Satılık", "Kiralık"])
+                new_prop_type = st.selectbox("Emlak Tipi", ["Daire", "Rezidans", "Müstakil Ev", "Villa", "Ofis"])
+                new_room = st.selectbox("Oda Sayısı", ["1+1", "2+1", "3+1", "4+1", "5+1"])
+                new_price = st.number_input("Fiyat (TL) *", min_value=100_000, step=100_000, value=7_500_000)
+                new_net_m2 = st.number_input("Net m² *", min_value=10, step=5, value=120)
+                new_gross_m2 = st.number_input("Brüt m²", min_value=10, step=5, value=140)
+            with col_a3:
+                new_age = st.number_input("Bina Yaşı", min_value=0, max_value=100, value=2)
+                new_floor = st.text_input("Kat", value="4")
+                new_heating = st.selectbox("Isıtma", ["Merkezi", "Kombi", "Yerden Isıtma"])
+                new_complex = st.checkbox("Site İçerisinde", value=True)
+                new_balcony = st.checkbox("Balkonlu", value=True)
+                new_furnished = st.checkbox("Eşyalı", value=False)
+
+            new_transport = st.text_input("Ulaşım Notları", placeholder="Metroya 5 dakika yürüme mesafesinde...")
+            new_desc = st.text_area("Açıklama", placeholder="Geniş, aydınlık, aileye uygun lüks daire...")
+            new_url = st.text_input("İlan Web Linki (Opsiyonel)")
+
+            add_submitted = st.form_submit_button("💾 İlanı Portföye Kaydet", type="primary", width="stretch")
+
+            if add_submitted:
+                if not new_title.strip() or not new_neighborhood.strip():
+                    st.error("Lütfen başlık ve mahalle alanlarını doldurun.")
+                else:
+                    new_row = {
+                        "listing_id": new_id,
+                        "title": new_title,
+                        "city": new_city,
+                        "district": new_district,
+                        "neighborhood": new_neighborhood,
+                        "property_type": new_prop_type,
+                        "transaction_type": new_transaction,
+                        "listing_type": new_transaction,
+                        "price_period": "Aylık" if new_transaction == "Kiralık" else "Satış",
+                        "room_count": new_room,
+                        "price": new_price,
+                        "gross_m2": new_gross_m2,
+                        "net_m2": new_net_m2,
+                        "building_age": new_age,
+                        "floor": new_floor,
+                        "heating": new_heating,
+                        "balcony": "true" if new_balcony else "false",
+                        "furnished": "true" if new_furnished else "false",
+                        "in_complex": "true" if new_complex else "false",
+                        "transport_notes": new_transport,
+                        "description": new_desc,
+                        "listing_url": new_url,
+                        "image_url": "",
+                        "status": "active",
+                    }
+                    updated_df = pd.concat([listings_data, pd.DataFrame([new_row])], ignore_index=True)
+                    st.session_state["listings_df"] = updated_df
+                    try:
+                        updated_df.to_csv(DATA_FILE, index=False)
+                        st.success(f"İlan `{new_id}` başarıyla eklendi ve diske kaydedildi!")
+                    except Exception as ex:
+                        st.warning(f"İlan hafızaya eklendi ancak diske yazılamadı: {ex}")
+                    st.rerun()
+
+    st.subheader("📋 Tüm Portföy Listesi")
+    st.dataframe(listings_data, hide_index=True, width="stretch")
+    all_csv = listings_data.to_csv(index=False).encode("utf-8")
+    st.download_button("📥 Tüm Portföyü CSV Olarak İndir", all_csv, "tum_portfoy.csv", "text/csv")
+
+
+# ==========================================
+# SEKME 5: PİYASA VE PORTFÖY ANALİTİĞİ
+# ==========================================
+with tab_analytics:
+    st.subheader("📈 Piyasa ve Portföy İstatistikleri")
+    st.caption("Satılık ve kiralık portföyler ayrı hesaplanır; boş veya geçersiz değerler ortalamalara katılmaz.")
+
+    analytics_df = active_df.copy()
+    analytics_df["price_num"] = pd.to_numeric(analytics_df["price"], errors="coerce")
+    analytics_df["net_m2_num"] = pd.to_numeric(analytics_df["net_m2"], errors="coerce")
+    analytics_df = analytics_df.dropna(subset=["price_num"])
+
+    if analytics_df.empty:
+        st.info("Analiz üretmek için geçerli fiyatı olan aktif ilan bulunmuyor.")
+    else:
+        analytics_sale = analytics_df[analytics_df["transaction_type"].eq("Satılık")].copy()
+        analytics_rent = analytics_df[analytics_df["transaction_type"].eq("Kiralık")].copy()
+
+        metric_a, metric_b, metric_c, metric_d = st.columns(4)
+        metric_a.metric("Medyan satış", f"{analytics_sale['price_num'].median() / 1_000_000:.1f} Mn TL" if not analytics_sale.empty else "Veri yok")
+        metric_b.metric("Medyan kira", f"{analytics_rent['price_num'].median():,.0f} TL".replace(",", ".") if not analytics_rent.empty else "Veri yok")
+        metric_c.metric("Satılık portföy", len(analytics_sale))
+        metric_d.metric("Kiralık portföy", len(analytics_rent))
+
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            st.write("**Mahalle bazında medyan satılık fiyatı**")
+            sale_neighborhood = (
+                analytics_sale.groupby("neighborhood")["price_num"].median().sort_values(ascending=False)
+                if not analytics_sale.empty else pd.Series(dtype=float)
+            )
+            if sale_neighborhood.empty:
+                st.info("Satılık fiyat grafiği için veri yok.")
+            else:
+                st.bar_chart(sale_neighborhood)
+
+        with col_g2:
+            st.write("**Mahalle bazında medyan kira**")
+            rent_neighborhood = (
+                analytics_rent.groupby("neighborhood")["price_num"].median().sort_values(ascending=False)
+                if not analytics_rent.empty else pd.Series(dtype=float)
+            )
+            if rent_neighborhood.empty:
+                st.info("Kiralık fiyat grafiği için veri yok.")
+            else:
+                st.bar_chart(rent_neighborhood)
+
+        col_g3, col_g4 = st.columns(2)
+        with col_g3:
+            st.write("**Oda sayısına göre ilan dağılımı**")
+            room_counts = analytics_df["room_count"].fillna("Belirtilmemiş").value_counts()
+            st.bar_chart(room_counts)
+        with col_g4:
+            st.write("**Emlak türüne göre ilan dağılımı**")
+            property_counts = analytics_df["property_type"].fillna("Belirtilmemiş").value_counts()
+            st.bar_chart(property_counts)
+
+        st.divider()
+        st.write("**Yatırım fırsatları: en düşük m² birim fiyatlı satılık ilanlar**")
+        investment_df = analytics_sale[analytics_sale["net_m2_num"].gt(0)].copy()
+        investment_df["m2_price"] = investment_df["price_num"] / investment_df["net_m2_num"]
+        investment_df = investment_df.replace([float("inf"), float("-inf")], pd.NA).dropna(subset=["m2_price"])
+        sorted_invest = investment_df.nsmallest(25, "m2_price")[[
+            "listing_id", "title", "neighborhood", "room_count", "price_num", "net_m2_num", "m2_price"
+        ]]
+
+        if sorted_invest.empty:
+            st.info("Birim fiyat analizi için uygun satılık ilan bulunmuyor.")
+        else:
+            st.dataframe(
+                sorted_invest,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "listing_id": "İlan No",
+                    "title": "Başlık",
+                    "neighborhood": "Mahalle",
+                    "room_count": "Oda",
+                    "price_num": st.column_config.NumberColumn("Fiyat", format="%d TL"),
+                    "net_m2_num": "Net m²",
+                    "m2_price": st.column_config.NumberColumn("Birim Fiyat", format="%d TL/m²"),
+                },
+            )

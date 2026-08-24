@@ -1,92 +1,71 @@
-# Emlak Eşleştirici
+# Emlak Zekası ve Portföy Eşleştirme
 
-Emlak danışmanının müşteri talebini portföydeki ilanlarla eşleştirmesi için
-hazırlanan web uygulamasıdır. Doğal dilde yazılan talebi Gemini ile analiz eder,
-100 ilanlık örnek portföyü puanlar ve müşteriye gönderilebilir kısa liste üretir.
+Emlak danışmanları için doğal dilde müşteri talebi analizi, açıklanabilir ilan
+eşleştirme, manuel filtreleme, karşılaştırma, portföy yönetimi ve piyasa analitiği
+sunan Streamlit uygulaması.
 
-## Özellikler
+## İçerik
 
-- Google Sheets üzerinden canlı portföy yönetimi
-- 100 çeşitli demo ilan ve her ilan için benzersiz satış avantajı
-- Daire, bahçe katı, villa, dubleks, rezidans, müstakil ev ve çatı katı
-- AI destekli müşteri talebi analizi ve açıklanabilir eşleşme puanı
-- Seçilen ilanlardan indirilebilir müşteri özeti
+- 500 ayrıntılı örnek ilan
+- Satılık ve kiralık portföyler için ayrı KPI ve piyasa hesapları
+- Gemini destekli kriter çıkarma ve API yoksa yerel kural motoru
+- Konum, işlem türü, oda, bütçe, alan ve ayrıntılı donanım puanlaması
+- Her sonuçta puan dökümü, karşılanan ve eksik kriterler
+- 2-4 ilanı oturum durumuyla karşılaştırma
+- WhatsApp müşteri sunumu
+- CSV portföy yönetimi ve dışa aktarma
 
-## Kurulum
+## Yerelde çalıştırma
+
+Windows'ta `run_app.bat` dosyasına çift tıklayın veya PowerShell'de:
 
 ```powershell
-cd D:\codex\real-estate-matcher
+cd real-estate-matcher
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-## Çalıştırma
-
-```powershell
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Tarayıcı otomatik açılmazsa terminalde gösterilen `http://localhost:8501`
-adresini açın.
+Uygulama varsayılan olarak `http://localhost:8501` adresinde açılır.
 
-Kurulum tamamlandıktan sonra `start_app.bat` dosyasına çift tıklayarak uygulamayı
-`http://localhost:8502` adresinde açabilirsiniz.
+## Gemini ayarı
 
-## Google Sheets portföyü
-
-Ayrı bir Google Sheet oluşturup proje service account adresiyle Düzenleyici
-olarak paylaşın. `.env.example` dosyasını `.env` adıyla oluşturup Sheet ID'yi
-ekleyin:
+Gemini zorunlu değildir. Anahtar yoksa uygulama yerel kural motoruyla çalışır.
+Yerelde `.env` dosyası oluşturun:
 
 ```env
-REAL_ESTATE_SHEET_ID=sheet_id_buraya
-GOOGLE_CREDENTIALS_FILE=..\credentials.json
+GEMINI_API_KEY=your_api_key_here
+GEMINI_MODEL=gemini-3.5-flash-lite
 ```
 
-Uygulama ilk bağlantıda `Listings` sekmesini oluşturup örnek ilanları yükler.
-Emlakçı bundan sonra ilanları bu sekmede yönetebilir. `status` değeri `active`
-olan ilanlar uygulamada görünür.
-
-## Gemini talep analizi
-
-Yeni ve güvenli bir Gemini anahtarını `.env` içine ekledikten sonra AI modunu
-açabilirsiniz:
-
-```env
-GEMINI_API_KEY=yeni_anahtar
-ENABLE_GEMINI=true
-```
-
-AI kapalıysa veya API çağrısı başarısız olursa uygulama yerel kriter ayrıştırıcıya
-geri döner ve çalışmaya devam eder.
-
-## İnternette yayınlama
-
-En kolay yöntem ücretsiz Streamlit Community Cloud kullanmaktır:
-
-1. `real-estate-matcher` klasörünü bir GitHub deposuna yükleyin. `.env`,
-   `credentials.json` ve `.streamlit/secrets.toml` dosyalarını kesinlikle
-   GitHub'a yüklemeyin; `.gitignore` bunları zaten engeller.
-2. `https://share.streamlit.io` adresinde GitHub ile giriş yapın ve **Create app**
-   seçeneğini açın.
-3. GitHub deponuzu seçin, ana dosya yolu olarak `app.py` yazın.
-4. **Advanced settings > Secrets** alanına aşağıdaki ayarları girin:
+Streamlit Community Cloud'da aynı değerleri uygulamanın **Secrets** alanına ekleyin:
 
 ```toml
-REAL_ESTATE_SHEET_ID = "sheet_id"
-GEMINI_API_KEY = "gemini_api_anahtari"
-ENABLE_GEMINI = "true"
-GOOGLE_CREDENTIALS_JSON = '''credentials.json dosyasının tek satırlık içeriği'''
+GEMINI_API_KEY = "your_api_key_here"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 ```
 
-5. **Deploy** düğmesine basın. Uygulama `https://...streamlit.app` biçiminde,
-   telefondan ve bilgisayardan açılabilen bir internet adresi alır.
+Anahtarları GitHub'a yüklemeyin.
 
-`credentials.json` içeriğini tek satıra çevirmek için proje üst klasöründe:
+## Streamlit Cloud
+
+Main file path:
+
+```text
+real-estate-matcher/app.py
+```
+
+GitHub'daki `main` dalına gönderilen her commit Streamlit Cloud tarafından otomatik
+olarak yeniden yayınlanır. Uygulama veriyi `real-estate-matcher/data/listings.csv`
+dosyasından okur.
+
+## Veri üretimi
+
+Örnek portföyü yeniden oluşturmak için:
 
 ```powershell
-(Get-Content .\credentials.json -Raw | ConvertFrom-Json | ConvertTo-Json -Compress)
+.\.venv\Scripts\python.exe generate_demo_listings.py
+Move-Item -Force listings.csv data\listings.csv
 ```
 
-Komutun çıktısını `GOOGLE_CREDENTIALS_JSON` değerindeki üç tek tırnağın arasına
-yapıştırın. Bu gizli içerik yalnızca Streamlit'in **Secrets** alanında bulunmalı.
+Her kayıt, en az 10 maddelik bina özelliği ile finansal ve teknik alanlar içerir.
