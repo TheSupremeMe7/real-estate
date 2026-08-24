@@ -471,7 +471,7 @@ with st.sidebar:
     active_df = listings_data[
         listings_data["status"].fillna("").astype(str).str.lower().eq("active")
     ]
-    
+
     st.divider()
     st.subheader("📊 Portföy Özeti")
     col_sb1, col_sb2 = st.columns(2)
@@ -773,7 +773,7 @@ with tab_ai:
 # ==========================================
 with tab_manual:
     st.subheader("🔍 Kriter Bazlı Manuel Portföy Arama")
-    
+
     with st.form("manual_search_form"):
         col_m1, col_m2, col_m3 = st.columns(3)
         with col_m1:
@@ -872,7 +872,7 @@ with tab_compare:
         st.info("Kıyaslama yapabilmek için lütfen en az 2 ilan seçin (AI Eşleştirme sekmesindeki kutucukları da kullanabilirsiniz).")
     else:
         comp_df = active_df[active_df["listing_id"].isin(selected_ids)].copy()
-        
+
         # Karşılaştırma kolonları
         cols = st.columns(len(selected_ids))
         for i, (_, row) in enumerate(comp_df.iterrows()):

@@ -128,7 +128,7 @@ def calculate_financial_metrics(price: float, net_m2: float | None, gross_m2: fl
     price_per_net_m2 = round(price / net_m2) if (net_m2 and net_m2 > 0) else None
     price_per_gross_m2 = round(price / gross_m2) if (gross_m2 and gross_m2 > 0) else None
     efficiency_ratio = round((net_m2 / gross_m2) * 100, 1) if (net_m2 and gross_m2 and gross_m2 > 0) else None
-    
+
     # İstanbul geneli ortalama kira çarpanı (~%0.42 - %0.48 aylık getiri)
     estimated_monthly_rent = round(price * 0.0045)
     amortization_years = round(price / (estimated_monthly_rent * 12), 1) if estimated_monthly_rent > 0 else 18.5
@@ -346,7 +346,7 @@ def match_listings(
             continue
         score, reasons, missing = calculate_match_score(listing, criteria)
         result = listing.where(pd.notna(listing), None).to_dict()
-        
+
         price = float(result.get("price") or 0)
         net_m2 = float(result.get("net_m2")) if result.get("net_m2") else None
         gross_m2 = float(result.get("gross_m2")) if result.get("gross_m2") else None
@@ -368,7 +368,7 @@ def find_near_matches(
 ) -> list[dict[str, Any]]:
     """Kesin filtreleri hafifçe aşan (örneğin bütçeyi %5-15 aşan veya komşu lokasyondaki) alternatif fırsatları bulur."""
     near_matches: list[dict[str, Any]] = []
-    
+
     # Zaten tam eşleşen ilanların ID'lerini bul
     exact_matched_ids = {
         listing["listing_id"] for listing in match_listings(listings, criteria)
@@ -415,7 +415,7 @@ def find_near_matches(
         score, reasons, missing = calculate_match_score(listing, criteria)
         # Esnetme olduğu için skoru hafifçe ölçekle
         adjusted_score = max(50, round(score * 0.88))
-        
+
         result = listing.where(pd.notna(listing), None).to_dict()
         net_m2 = float(result.get("net_m2")) if result.get("net_m2") else None
         gross_m2 = float(result.get("gross_m2")) if result.get("gross_m2") else None

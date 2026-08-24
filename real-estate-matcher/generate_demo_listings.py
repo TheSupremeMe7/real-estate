@@ -32,7 +32,7 @@ LOCATIONS = [
     ("İstanbul", "Bakırköy", "Florya", "Sahil, koru ve geniş bahçeli butik mülkler"),
     ("İstanbul", "Beylikdüzü", "Adnan Kahveci", "Geniş bulvarlar, yeni siteler ve uygun fiyat avantajı"),
     ("İstanbul", "Beylikdüzü", "Yakuplu", "Marina ve sahil odaklı modern yaşam"),
-    
+
     # İstanbul Anadolu
     ("İstanbul", "Kadıköy", "Fenerbahçe", "Kalamış marina ve sahil yürüyüş hattında elit lokasyon"),
     ("İstanbul", "Kadıköy", "Caddebostan", "Bağdat Caddesi ve sahil parkı arasında en popüler semt"),
@@ -78,13 +78,13 @@ PROPERTY_PROFILES = [
     ("Konut", "Rezidans", ["1+0", "1+1", "2+1", "3+1"], "assets/smart-studio-thumb.webp"),
     ("Konut", "Müstakil Ev", ["3+1", "4+1", "5+2"], "assets/villa-garden-thumb.webp"),
     ("Konut", "Çatı Katı", ["2+1", "3+1", "4+1"], "assets/penthouse-terrace-thumb.webp"),
-    
+
     # Ticari
     ("Ticari", "Dükkan / Mağaza", ["Açık Alan / 2 Bölüm", "Açık Alan / 4 Bölüm", "Düz Giriş + Asma Kat"], "assets/commercial-shop-thumb.webp"),
     ("Ticari", "Ofis / Büro", ["2+1", "3+1", "Açık Alan / 4 Bölüm", "Açık Alan / 8 Bölüm"], "assets/office-plaza-thumb.webp"),
     ("Ticari", "Plaza Katı", ["Tam Kat Açık Ofis", "Bölümlü Plaza Katı", "Panoramik Executive Kat"], "assets/office-plaza-thumb.webp"),
     ("Ticari", "Depo / Atölye", ["Açık Yüksek Tavan Alan", "Depo + Ofis Bölümü"], "assets/warehouse-logistics-thumb.webp"),
-    
+
     # Arsa
     ("Arsa", "İmarlı Arsa", ["Müstakil Parsel", "Konut İmarlı", "Ticari + Konut İmarlı"], "assets/villa-garden-thumb.webp"),
 ]
@@ -258,24 +258,24 @@ def generate_500_listings() -> pd.DataFrame:
         for item in feature_set.split(";")
         if item.strip()
     ]
-    
+
     for i in range(500):
         row_rng = random.Random(101_003 + i * 7_919)
         # 1. Lokasyon seçimi
         loc = LOCATIONS[i % len(LOCATIONS)]
         city, district, neighborhood, loc_desc = loc
-        
+
         # 2. İlan Tipi: Yaklaşık %68 Satılık, %32 Kiralık
         is_rental = (i % 3 == 2) or (i % 7 == 0)
         listing_type = "Kiralık" if is_rental else "Satılık"
         price_period = "Aylık" if is_rental else "Satış"
-        
+
         # 3. Mülk Profili: Konut / Ticari / Arsa
         profile_index = (i + i // len(LOCATIONS)) % len(PROPERTY_PROFILES)
         profile = PROPERTY_PROFILES[profile_index]
         category, prop_type, room_options, img_path = profile
         room = row_rng.choice(room_options)
-        
+
         # 4. Alan Hesabı
         if category == "Arsa":
             gross_m2 = 350 + (i * 37) % 1200
@@ -294,7 +294,7 @@ def generate_500_listings() -> pd.DataFrame:
             if prop_type in {"Villa", "Müstakil Ev"}:
                 gross_m2 += 140
             net_m2 = int(gross_m2 * (0.80 + (i % 5) * 0.015))
-        
+
         # 5. Bina Yaşı ve Deprem Yönetmeliği
         building_age = row_rng.randint(0, 23)
         if building_age <= 6:
@@ -303,7 +303,7 @@ def generate_500_listings() -> pd.DataFrame:
             earthquake_reg = "2007-2018 Deprem Yönetmeliği"
         else:
             earthquake_reg = "2007 Öncesi Yapı"
-            
+
         total_floors = 3 + (i % 18)
         if prop_type in {"Villa", "Müstakil Ev"}:
             total_floors = 2 + (i % 2)
@@ -321,7 +321,7 @@ def generate_500_listings() -> pd.DataFrame:
             total_floors = 0
         else:
             floor = str(1 + (i % total_floors))
-            
+
         # 6. Fiyatlandırma
         # Bölgesel Çarpan
         base_multiplier = 1.0
@@ -335,7 +335,7 @@ def generate_500_listings() -> pd.DataFrame:
             base_multiplier = 1.1
         else:
             base_multiplier = 0.85
-            
+
         if is_rental:
             # Kiralık Fiyatı: 18.000 TL - 350.000 TL
             base_rental = 180 * gross_m2 * base_multiplier
@@ -363,13 +363,13 @@ def generate_500_listings() -> pd.DataFrame:
             estimated_rent = int(price / row_rng.randint(190, 240))
             roi_years = round(price / (estimated_rent * 12), 1)
             annual_roi = round((estimated_rent * 12 / price) * 100, 2)
-            
+
         # 7. Kriter Değerleri
         bathrooms = 1
         if category != "Arsa":
             bathrooms = max(1, min(5, int(gross_m2 / 65)))
         master_bath = bathrooms >= 2 and prop_type not in {"Dükkan / Mağaza", "Depo / Atölye"}
-        
+
         balcony = prop_type not in {"Dükkan / Mağaza", "Depo / Atölye"} and row_rng.random() < 0.72
         in_complex = (category != "Arsa") and (prop_type not in {"Müstakil Ev"}) and row_rng.random() < 0.76
         near_metro = (district not in {"Urla", "Çeşme", "Bodrum"}) and row_rng.random() < 0.68
@@ -377,47 +377,47 @@ def generate_500_listings() -> pd.DataFrame:
         elevator = total_floors > 3 or prop_type == "Plaza Katı"
         smart_home = (building_age <= 5 and row_rng.random() < 0.8) or row_rng.random() < 0.22
         ev_charging = in_complex and row_rng.random() < (0.65 if building_age <= 6 else 0.18)
-        
+
         parking = row_rng.choice(PARKING_TYPES)
         if ev_charging and "EV Şarj" not in parking:
             parking = "2 Araçlık Kapalı + EV Şarj"
-            
+
         heating = row_rng.choice(HEATING_TYPES)
         facade = row_rng.choice(FACADES)
         security = row_rng.choice(SECURITY_TYPES)
         view = row_rng.choice(VIEW_TYPES)
         outdoor = row_rng.choice(OUTDOOR_SPACES)
         kitchen = row_rng.choice(KITCHEN_TYPES)
-        
+
         deed = "Kat Mülkiyeti (İskanlı)" if building_age <= 18 else "Kat İrtifakı (İskanlı)"
         if category == "Arsa":
             deed = "Müstakil Parsel Tapu"
         credit_eligible = i % 12 != 0
         iskan_status = "İskanlı / Yapı Kullanım İzinli" if credit_eligible else "İskan Başvurusunda"
-        
+
         if is_rental:
             usage = "Boş (Hemen Taşınmaya Hazır)" if i % 3 == 0 else "Kiracıya Uygun / Tahliye Edilecek"
         else:
             usage = "Boş (Hemen Taşınmaya Hazır)" if i % 2 == 0 else ("Kiracılı (Yüksek Getirili)" if i % 3 == 0 else "Mülk Sahibi Oturuyor")
-            
+
         dues = 650 + (i % 15) * 350
         if in_complex and "Lüks" in security:
             dues += 1500
         if category == "Arsa":
             dues = 0
-            
+
         # 8. Başlık ve Açıklama
         if category == "Ticari":
             adjective = TITLES_COMMERCIAL[i % len(TITLES_COMMERCIAL)]
         else:
             adjective = TITLES_RESIDENTIAL[i % len(TITLES_RESIDENTIAL)]
-            
+
         title = f"{neighborhood} bölgesinde {listing_type} {room} {prop_type} - {adjective}"
-        
+
         # 9. Pros & Cons (Artılar & Eksiler)
         pros_list = []
         cons_list = []
-        
+
         # Dinamik Artılar
         if earthquake_reg == "2018 Sonrası Deprem Yönetmeliği":
             pros_list.append("2018 sonrası güncel deprem yönetmeliğine tam uygun radye temel ve C35 betonarme yapı")
@@ -435,7 +435,7 @@ def generate_500_listings() -> pd.DataFrame:
             pros_list.append("7/24 güvenlikli ve zengin sosyal donatılı prestijli site yerleşimi")
         if annual_roi >= 6.0:
             pros_list.append(f"Yıllık %{annual_roi} brüt getiri ve {roi_years} yıl hızlı amortisman potansiyeli")
-            
+
         # Fallback pros
         while len(pros_list) < 4:
             pool = PROS_POOL["ticari"] if category == "Ticari" else PROS_POOL["genel"]
@@ -443,7 +443,7 @@ def generate_500_listings() -> pd.DataFrame:
             if p_cand not in pros_list:
                 pros_list.append(p_cand)
         pros_text = " • ".join(pros_list[:4])
-        
+
         # Dinamik Eksiler
         if dues >= 3500:
             cons_list.append(f"Aylık {dues:,} TL site aidat bedeli bütçe planlamasında dikkate alınmalıdır")
@@ -457,7 +457,7 @@ def generate_500_listings() -> pd.DataFrame:
             cons_list.append("Açık balkon alanı bulunmamaktadır; iç mekan net alanı maksimize edilmiştir")
         if not elevator and total_floors > 2:
             cons_list.append("Binada asansör bulunmamaktadır; merdiven kullanımı gerektirir")
-            
+
         # Fallback cons
         while len(cons_list) < 2:
             pool = CONS_POOL["ticari"] if category == "Ticari" else CONS_POOL["genel"]
@@ -465,17 +465,17 @@ def generate_500_listings() -> pd.DataFrame:
             if c_cand not in cons_list:
                 cons_list.append(c_cand)
         cons_text = " • ".join(cons_list[:3])
-        
+
         highlight = (
             f"{loc_desc}. {pros_list[0]}. {gross_m2} m² brüt / {net_m2} m² net kullanım alanı sunmaktadır."
         )
-        
+
         description = (
             f"{city} {district}, {neighborhood} mevkiinde yer alan {listing_type.lower()} {prop_type}. "
             f"{room} planında, {gross_m2} m² brüt alana sahip. {earthquake_reg} standartlarında inşa edilmiş, "
             f"{facade} cepheli ve {heating} sistemlidir. {highlight}"
         )
-        
+
         rows.append({
             "listing_id": f"PRT-{i + 1:03d}",
             "title": title,
@@ -533,7 +533,7 @@ def generate_500_listings() -> pd.DataFrame:
             "image_url": img_path,
             "status": "active",
         })
-        
+
     listings = pd.DataFrame(rows, columns=LISTING_COLUMNS)
 
     scenario_overrides = [
