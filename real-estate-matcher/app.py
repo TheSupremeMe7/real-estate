@@ -31,9 +31,16 @@ from matcher import (
     match_listings,
     normalize_boolean,
 )
+from land_intelligence import (
+    SOURCE_CONFIDENCE,
+    calculate_development_capacity,
+    calculate_feasibility,
+    calculate_land_risk,
+)
 
 
 DATA_FILE = Path(__file__).parent / "data" / "listings.csv"
+LAND_DATA_FILE = Path(__file__).parent / "data" / "lands.csv"
 CUSTOMERS_FILE = Path(__file__).parent / "data" / "customers.json"
 REQUIRED_COLUMNS = {
     "listing_id",
@@ -147,6 +154,28 @@ def load_listings_from_disk(file_path: Path) -> pd.DataFrame:
         missing_text = ", ".join(sorted(missing_columns))
         raise ValueError(f"Eksik kolonlar: {missing_text}")
     return listings
+
+
+@st.cache_data
+def load_lands_from_disk(file_path: Path) -> pd.DataFrame:
+    """Demo arsa portföyünü sayısal alanları doğrulayarak yükler."""
+    lands = pd.read_csv(file_path, encoding="utf-8-sig")
+    required = {
+        "land_id", "title", "city", "district", "neighborhood", "area_m2",
+        "price", "taks", "kaks", "max_floors", "zoning_type", "ownership_type",
+        "road_frontage_m", "slope_pct", "infrastructure_score", "risk_summary",
+    }
+    missing = required - set(lands.columns)
+    if missing:
+        raise ValueError(f"Arsa verisinde eksik kolonlar: {', '.join(sorted(missing))}")
+    for column in (
+        "area_m2", "price", "taks", "kaks", "max_floors", "road_frontage_m",
+        "slope_pct", "infrastructure_score",
+    ):
+        lands[column] = pd.to_numeric(lands[column], errors="coerce")
+    lands = lands.dropna(subset=["area_m2", "price", "taks", "kaks"])
+    lands["unit_price"] = lands["price"] / lands["area_m2"]
+    return lands
 
 
 def get_listings_df() -> pd.DataFrame:
@@ -366,6 +395,12 @@ def criterion_display_label(key: str) -> str:
     if key.startswith("exclude:"):
         return f"Olmamalı: {key.split(':', 1)[1]}"
     return labels.get(key, key.replace("_", " ").title())
+
+
+def safe_criterion_modes(criteria: object) -> dict[str, str]:
+    """Eski oturum veya AI nesnelerinde criterion_modes yoksa güvenli varsayılan döndürür."""
+    modes = getattr(criteria, "criterion_modes", {}) or {}
+    return modes if isinstance(modes, dict) else {}
 
 
 def refresh_ai_matches(listings: pd.DataFrame) -> None:
@@ -704,13 +739,23 @@ st.caption(
 
 # --- ANA SEKMELER ---
 
-tab_ai, tab_manual, tab_compare, tab_portfolio, tab_analytics = st.tabs(
+(
+    tab_ai,
+    tab_manual,
+    tab_compare,
+    tab_portfolio,
+    tab_analytics,
+    tab_land,
+    tab_feasibility,
+) = st.tabs(
     [
         "🤖 AI Eşleştirme",
         "🔍 İlanlar",
         f"⚖️ Karşılaştır ({len(st.session_state['compare_selected'])})",
         "➕ Portföy",
         "📈 Piyasa",
+        "🗺️ Arsa Zekâsı",
+        "🏗️ Fizibilite",
     ]
 )
 
@@ -760,8 +805,10 @@ with tab_ai:
                     for session_key in list(st.session_state):
                         if str(session_key).startswith("criterion_mode_"):
                             del st.session_state[session_key]
-                    for criterion_key, criterion_mode_value in parsed.criterion_modes.items():
-                        st.session_state[f"criterion_mode_{criterion_key}"] = CRITERION_MODE_LABELS[criterion_mode_value]
+                    for criterion_key, criterion_mode_value in safe_criterion_modes(parsed).items():
+                        st.session_state[f"criterion_mode_{criterion_key}"] = CRITERION_MODE_LABELS.get(
+                            criterion_mode_value, "Tercih"
+                        )
                     if count_detected_criteria(parsed_data) == 0:
                         st.session_state["ai_matches"] = []
                         st.session_state["near_matches"] = []
@@ -777,6 +824,11 @@ with tab_ai:
                     st.session_state["analysis_method"] = parsed.analysis_method
                 except CriteriaParserError as err:
                     st.error(str(err))
+                except Exception:
+                    st.error(
+                        "Eşleştirme tamamlanamadı. Talebi sadeleştirip tekrar deneyin; "
+                        "sorun sürerse sayfayı yenileyin."
+                    )
 
     if st.session_state.get("search_performed"):
         criteria_count = count_detected_criteria(st.session_state.get("parsed_criteria", {}))
@@ -795,13 +847,14 @@ with tab_ai:
         with st.expander("📋 AI Tarafından Algılanan Kriter Özeti", expanded=False):
             render_criteria_summary(criteria_data)
             criteria_object = st.session_state.get("parsed_criteria_obj")
-            if criteria_object and criteria_object.criterion_modes:
+            criterion_modes = safe_criterion_modes(criteria_object) if criteria_object else {}
+            if criteria_object and criterion_modes:
                 st.markdown("**Kriter önceliklerini doğrulayın**")
                 st.caption("Zorunlu kriterler tam eşleşme listesini filtreler; tercihler puanı etkiler.")
                 mode_fields = []
                 with st.form("criterion_priority_form"):
                     mode_columns = st.columns(2)
-                    for criterion_index, criterion_key in enumerate(criteria_object.criterion_modes):
+                    for criterion_index, criterion_key in enumerate(criterion_modes):
                         widget_key = f"criterion_mode_{criterion_key}"
                         with mode_columns[criterion_index % 2]:
                             st.selectbox(
@@ -1359,3 +1412,315 @@ with tab_analytics:
                     "m2_price": st.column_config.NumberColumn("Birim Fiyat", format="%d TL/m²"),
                 },
             )
+
+
+# ==========================================
+# ARSA ZEKÂSI
+# ==========================================
+with tab_land:
+    st.subheader("Arsa Zekâsı")
+    st.caption("Yapılaşma kapasitesi, veri güveni ve yatırım risklerini aynı çalışma alanında inceleyin.")
+    land_build_tab, land_risk_tab, land_portfolio_tab = st.tabs(
+        ["Yapılaşma", "Risk ve kaynak", "Arsa portföyü"]
+    )
+
+    with land_build_tab:
+        with st.form("land_development_form"):
+            build_a, build_b, build_c, build_d, build_e = st.columns(5)
+            with build_a:
+                land_area = st.number_input("Arsa alanı (m²)", min_value=1.0, value=1000.0, step=50.0)
+            with build_b:
+                land_taks = st.number_input("TAKS", min_value=0.01, max_value=1.0, value=0.30, step=0.05)
+            with build_c:
+                land_kaks = st.number_input("KAKS / Emsal", min_value=0.01, max_value=10.0, value=0.90, step=0.05)
+            with build_d:
+                land_floors = st.number_input("Maksimum kat", min_value=1, max_value=60, value=3, step=1)
+            with build_e:
+                common_area = st.number_input("Ortak alan payı (%)", min_value=0.0, max_value=80.0, value=20.0, step=1.0)
+            development_submit = st.form_submit_button("Yapılaşma kapasitesini hesapla", type="primary", width="stretch")
+
+        if development_submit or "land_development_result" not in st.session_state:
+            try:
+                st.session_state["land_development_result"] = calculate_development_capacity(
+                    land_area, land_taks, land_kaks, int(land_floors), common_area
+                )
+                st.session_state["land_development_inputs"] = {
+                    "land_area_m2": land_area,
+                    "taks": land_taks,
+                    "kaks": land_kaks,
+                    "max_floors": int(land_floors),
+                    "common_area_pct": common_area,
+                }
+            except ValueError as error:
+                st.error(str(error))
+
+        development = st.session_state.get("land_development_result")
+        if development:
+            metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+            metric_1.metric("Maksimum taban", f"{development['footprint_m2']:,.0f} m²".replace(",", "."))
+            metric_2.metric("Emsale göre alan", f"{development['zoning_area_m2']:,.0f} m²".replace(",", "."))
+            metric_3.metric("Yaklaşık inşaat alanı", f"{development['gross_buildable_m2']:,.0f} m²".replace(",", "."))
+            metric_4.metric("Tahmini satılabilir alan", f"{development['sellable_area_m2']:,.0f} m²".replace(",", "."))
+            st.info(f"Sınırlayıcı koşul: {development['binding_constraint']}")
+
+            scenario_df = pd.DataFrame(development["unit_scenarios"])
+            st.dataframe(
+                scenario_df,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "scenario": "Olası proje tipi",
+                    "average_unit_m2": st.column_config.NumberColumn("Ortalama bağımsız bölüm", format="%d m²"),
+                    "estimated_units": st.column_config.NumberColumn("Yaklaşık adet", format="%d"),
+                },
+            )
+            st.warning(
+                "Bu çalışma ön fizibilitedir. Çekme mesafeleri, plan notları, otopark, yangın, sığınak, "
+                "jeoloji ve belediye uygulamaları sonucu değiştirebilir; resmî proje veya ruhsat onayı değildir."
+            )
+
+    with land_risk_tab:
+        hazard_labels = [
+            "Taşkın", "Heyelan", "Orman sınırı", "Sit alanı", "Su havzası",
+            "Tarım koruma alanı", "Kamulaştırma", "Enerji hattı", "Dere yatağı", "Zemin riski",
+        ]
+        infrastructure_labels = ["Elektrik", "Su", "Kanalizasyon", "Doğalgaz", "İnternet", "Yol erişimi"]
+        source_options = list(SOURCE_CONFIDENCE)
+
+        with st.form("land_risk_form"):
+            st.markdown("**İmar ve tapu**")
+            risk_a, risk_b, risk_c, risk_d = st.columns(4)
+            with risk_a:
+                risk_zoning = st.selectbox("İmar türü", ["Konut", "Ticaret", "Konut + Ticaret", "Sanayi", "Turizm", "Tarım", "İmarsız", "Bilinmiyor"])
+                risk_ownership = st.selectbox("Mülkiyet", ["Müstakil", "Hisseli", "Bilinmiyor"])
+            with risk_b:
+                risk_taks = st.number_input("Risk hesabı TAKS", min_value=0.0, max_value=1.0, value=0.30, step=0.05)
+                risk_encumbrance = st.selectbox("İpotek / şerh", ["Yok", "Var", "Bilinmiyor"])
+            with risk_c:
+                risk_kaks = st.number_input("Risk hesabı KAKS", min_value=0.0, max_value=10.0, value=0.90, step=0.05)
+                risk_cadastral = st.selectbox("Kadastro", ["Tamamlandı", "Belirsiz", "Sorunlu"])
+            with risk_d:
+                risk_floors = st.number_input("Risk hesabı kat", min_value=0, max_value=60, value=3, step=1)
+                regional_potential = st.slider("Bölgesel potansiyel", 0, 100, 75)
+
+            st.markdown("**Fiziksel durum ve altyapı**")
+            physical_a, physical_b, physical_c, physical_d = st.columns(4)
+            with physical_a:
+                parcel_shape = st.selectbox("Parsel şekli", ["Düzgün", "Trapez", "Düzensiz", "Bilinmiyor"])
+            with physical_b:
+                road_frontage = st.number_input("Yol cephesi (m)", min_value=0.0, value=18.0, step=1.0)
+            with physical_c:
+                slope = st.number_input("Ortalama eğim (%)", min_value=0.0, max_value=100.0, value=6.0, step=1.0)
+            with physical_d:
+                road_access_label = st.selectbox("Yol erişimi", ["Var", "Yok", "Bilinmiyor"])
+                corner_parcel = st.checkbox("Köşe parsel")
+
+            infra_available = st.multiselect(
+                "Mevcut altyapı",
+                infrastructure_labels,
+                default=["Elektrik", "Su", "Kanalizasyon", "İnternet", "Yol erişimi"],
+            )
+            infra_unknown = st.multiselect("Doğrulanmayan altyapı", infrastructure_labels, default=["Doğalgaz"])
+            hazards_present = st.multiselect("Tespit edilen riskler", hazard_labels)
+            hazards_unknown = st.multiselect("Henüz doğrulanmayan riskler", hazard_labels, default=hazard_labels)
+
+            st.markdown("**Bilgi kaynakları**")
+            source_a, source_b, source_c, source_d, source_e = st.columns(5)
+            with source_a:
+                title_source = st.selectbox("Tapu kaynağı", source_options, index=0)
+            with source_b:
+                zoning_source = st.selectbox("İmar kaynağı", source_options, index=0)
+            with source_c:
+                physical_source = st.selectbox("Fiziksel veri", source_options, index=2)
+            with source_d:
+                infrastructure_source = st.selectbox("Altyapı kaynağı", source_options, index=2)
+            with source_e:
+                regional_source = st.selectbox("Bölge verisi", source_options, index=1)
+            risk_submit = st.form_submit_button("Arsa riskini puanla", type="primary", width="stretch")
+
+        if risk_submit:
+            infra_map = {
+                label: (True if label in infra_available else (None if label in infra_unknown else False))
+                for label in infrastructure_labels
+            }
+            hazard_map = {
+                label: (True if label in hazards_present else (None if label in hazards_unknown else False))
+                for label in hazard_labels
+            }
+            st.session_state["land_risk_result"] = calculate_land_risk(
+                zoning_type=risk_zoning,
+                taks=risk_taks or None,
+                kaks=risk_kaks or None,
+                max_floors=int(risk_floors) or None,
+                ownership_type=risk_ownership,
+                encumbrance_status=risk_encumbrance,
+                cadastral_status=risk_cadastral,
+                parcel_shape=parcel_shape,
+                road_frontage_m=road_frontage,
+                slope_pct=slope,
+                road_access={"Var": True, "Yok": False, "Bilinmiyor": None}[road_access_label],
+                corner_parcel=corner_parcel,
+                infrastructure=infra_map,
+                hazards=hazard_map,
+                regional_potential=regional_potential,
+                sources={
+                    "Tapu": title_source,
+                    "İmar": zoning_source,
+                    "Fiziksel özellikler": physical_source,
+                    "Altyapı": infrastructure_source,
+                    "Bölgesel veri": regional_source,
+                },
+            )
+
+        risk_result = st.session_state.get("land_risk_result")
+        if risk_result:
+            overall_a, overall_b = st.columns(2)
+            overall_a.metric("Genel arsa puanı", f"{risk_result['overall_score']}/100")
+            overall_b.metric("Veri güveni", f"{risk_result['confidence_score']}/100")
+            for component, score in risk_result["component_scores"].items():
+                st.progress(score / 100, text=f"{component}: {score}/100")
+
+            risk_flags = risk_result["risk_flags"]
+            if risk_flags:
+                st.markdown("**Kontrol edilmesi gerekenler**")
+                for flag in risk_flags[:8]:
+                    st.write(f"{flag['severity']} · {flag['message']}")
+                if len(risk_flags) > 8:
+                    st.caption(f"{len(risk_flags) - 8} ek doğrulama maddesi daha var.")
+            else:
+                st.success("Girilen bilgilerde açık bir risk işareti bulunmadı.")
+            st.dataframe(pd.DataFrame(risk_result["source_rows"]), hide_index=True, width="stretch")
+            st.warning("Risk puanı hukuki inceleme, tapu kaydı, imar çapı veya zemin etüdünün yerine geçmez.")
+
+    with land_portfolio_tab:
+        try:
+            land_df = load_lands_from_disk(LAND_DATA_FILE)
+        except (OSError, ValueError) as error:
+            st.error(f"Arsa portföyü yüklenemedi: {error}")
+            land_df = pd.DataFrame()
+
+        if not land_df.empty:
+            land_filter_a, land_filter_b = st.columns(2)
+            with land_filter_a:
+                land_city = st.selectbox("Arsa şehri", ["Tümü", *optional_values(land_df, "city")])
+            with land_filter_b:
+                land_zoning = st.selectbox("Arsa imarı", ["Tümü", *optional_values(land_df, "zoning_type")])
+            filtered_lands = land_df.copy()
+            if land_city != "Tümü":
+                filtered_lands = filtered_lands[filtered_lands["city"].eq(land_city)]
+            if land_zoning != "Tümü":
+                filtered_lands = filtered_lands[filtered_lands["zoning_type"].eq(land_zoning)]
+
+            land_view = filtered_lands[[
+                "land_id", "title", "district", "neighborhood", "area_m2", "price", "unit_price",
+                "taks", "kaks", "max_floors", "zoning_type", "ownership_type", "risk_summary",
+            ]]
+            st.dataframe(
+                land_view,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "land_id": "Arsa No",
+                    "title": "Başlık",
+                    "district": "İlçe",
+                    "neighborhood": "Mahalle",
+                    "area_m2": st.column_config.NumberColumn("Arsa", format="%d m²"),
+                    "price": st.column_config.NumberColumn("Fiyat", format="%d TL"),
+                    "unit_price": st.column_config.NumberColumn("Birim fiyat", format="%d TL/m²"),
+                    "taks": "TAKS",
+                    "kaks": "KAKS",
+                    "max_floors": "Kat",
+                    "zoning_type": "İmar",
+                    "ownership_type": "Tapu",
+                    "risk_summary": "Ön risk notu",
+                },
+            )
+            st.bar_chart(filtered_lands.set_index("title")["unit_price"])
+            st.download_button(
+                "Arsa karşılaştırmasını indir",
+                land_view.to_csv(index=False).encode("utf-8-sig"),
+                "arsa_karsilastirma.csv",
+                "text/csv",
+            )
+            st.caption("Portföydeki arsalar gösterim amaçlı örnek verilerdir; resmî teklif veya tapu kaydı değildir.")
+
+
+# ==========================================
+# PROJE FİZİBİLİTESİ
+# ==========================================
+with tab_feasibility:
+    st.subheader("Proje Fizibilitesi")
+    development_default = st.session_state.get("land_development_result", {})
+    default_construction_area = float(development_default.get("gross_buildable_m2", 900))
+    default_sellable_area = float(development_default.get("sellable_area_m2", 720))
+
+    with st.form("feasibility_form"):
+        st.markdown("**Yatırım ve maliyet**")
+        finance_a, finance_b, finance_c, finance_d = st.columns(4)
+        with finance_a:
+            feasibility_land_price = st.number_input("Arsa fiyatı (TL)", min_value=0.0, value=10_000_000.0, step=250_000.0)
+            feasibility_closing = st.number_input("Tapu ve komisyon (TL)", min_value=0.0, value=500_000.0, step=50_000.0)
+        with finance_b:
+            feasibility_build_area = st.number_input("İnşaat alanı (m²)", min_value=1.0, value=default_construction_area, step=50.0)
+            feasibility_sellable = st.number_input("Satılabilir alan (m²)", min_value=1.0, value=default_sellable_area, step=50.0)
+        with finance_c:
+            feasibility_build_cost = st.number_input("İnşaat maliyeti (TL/m²)", min_value=0.0, value=20_000.0, step=500.0)
+            feasibility_project = st.number_input("Ruhsat ve proje (TL)", min_value=0.0, value=1_500_000.0, step=100_000.0)
+        with finance_d:
+            feasibility_ground = st.number_input("Zemin iyileştirme (TL)", min_value=0.0, value=500_000.0, step=100_000.0)
+            feasibility_finance = st.number_input("Finansman maliyeti (TL)", min_value=0.0, value=3_200_000.0, step=100_000.0)
+
+        sales_a, sales_b = st.columns(2)
+        with sales_a:
+            feasibility_sale_price = st.number_input("Tahmini satış fiyatı (TL/m²)", min_value=0.0, value=60_000.0, step=1_000.0)
+        with sales_b:
+            feasibility_contingency = st.slider("Beklenmeyen gider payı (%)", 0, 40, 10)
+        feasibility_submit = st.form_submit_button("Üç senaryoyu hesapla", type="primary", width="stretch")
+
+    if feasibility_submit or "feasibility_result" not in st.session_state:
+        try:
+            st.session_state["feasibility_result"] = calculate_feasibility(
+                land_price=feasibility_land_price,
+                closing_cost=feasibility_closing,
+                construction_area_m2=feasibility_build_area,
+                sellable_area_m2=feasibility_sellable,
+                construction_cost_per_m2=feasibility_build_cost,
+                project_cost=feasibility_project,
+                ground_improvement_cost=feasibility_ground,
+                financing_cost=feasibility_finance,
+                sale_price_per_m2=feasibility_sale_price,
+                contingency_pct=float(feasibility_contingency),
+            )
+        except ValueError as error:
+            st.error(str(error))
+
+    feasibility_result = st.session_state.get("feasibility_result", [])
+    if feasibility_result:
+        result_df = pd.DataFrame(feasibility_result)
+        scenario_columns = st.columns(3)
+        for column, result in zip(scenario_columns, feasibility_result):
+            with column:
+                profitability_text = f"{result['Kârlılık %']:.1f}".replace(".", ",")
+                st.metric(result["Senaryo"], f"{profitability_text}%")
+                st.caption(
+                    f"Kâr: {result['Brüt kâr']:,.0f} TL · "
+                    f"Başabaş: {result['Başabaş TL/m²']:,.0f} TL/m²".replace(",", ".")
+                )
+        st.dataframe(
+            result_df,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Toplam maliyet": st.column_config.NumberColumn(format="%d TL"),
+                "Tahmini gelir": st.column_config.NumberColumn(format="%d TL"),
+                "Brüt kâr": st.column_config.NumberColumn(format="%d TL"),
+                "Kârlılık %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Kâr marjı %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Başabaş TL/m²": st.column_config.NumberColumn(format="%d TL/m²"),
+            },
+        )
+        st.bar_chart(result_df.set_index("Senaryo")[["Toplam maliyet", "Tahmini gelir"]])
+        st.warning(
+            "Sonuçlar girilen varsayımlara dayalı ön fizibilitedir; vergi, süre uzaması, satış hızı, "
+            "teknik zorunluluklar ve resmî kurum kararları ayrıca incelenmelidir."
+        )

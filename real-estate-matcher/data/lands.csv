@@ -1,0 +1,9 @@
+land_id,title,city,district,neighborhood,area_m2,price,taks,kaks,max_floors,zoning_type,ownership_type,road_frontage_m,slope_pct,infrastructure_score,risk_summary
+ARSA-001,Kayaşehir konut imarlı köşe parsel,İstanbul,Başakşehir,Kayaşehir,1248,18720000,0.30,0.90,3,Konut,Müstakil,24,4,88,Düşük eğim; altyapı parsel sınırında
+ARSA-002,Hadımköy ticaret aksında yatırım arsası,İstanbul,Arnavutköy,Hadımköy,2100,31500000,0.40,1.20,4,Konut + Ticaret,Müstakil,38,7,82,Plan notları belediyeden teyit edilmeli
+ARSA-003,Çatalca gelişim bölgesi hisseli arazi,İstanbul,Çatalca,Ferhatpaşa,3500,9800000,0.10,0.20,2,Tarım,Hisseli,11,13,46,Hisseli tapu; imar fonksiyonu sınırlı
+ARSA-004,İncek villa imarlı parsel,Ankara,Gölbaşı,İncek,1800,16200000,0.20,0.40,2,Konut,Müstakil,31,6,76,Villa kullanımı; doğalgaz bağlantısı teyit bekliyor
+ARSA-005,Urla düşük yoğunluklu konut arsası,İzmir,Urla,Kekliktepe,960,14400000,0.20,0.40,2,Konut,Müstakil,19,9,70,Su havzası görüşü alınmalı
+ARSA-006,Nilüfer gelişme konut alanı,Bursa,Nilüfer,Bademli,2250,20250000,0.25,0.75,3,Konut,Müstakil,27,5,84,Kadastral yol ve altyapı mevcut
+ARSA-007,Döşemealtı geniş konut parseli,Antalya,Döşemealtı,Altınkale,3000,18000000,0.25,0.80,3,Konut,Müstakil,42,3,79,Zemin etüdü henüz yüklenmedi
+ARSA-008,Bodrum turizm kullanımına yakın arazi,Muğla,Bodrum,Gündoğan,1550,38750000,0.15,0.30,2,Turizm,Hisseli,16,22,58,Yüksek eğim; hisseli mülkiyet

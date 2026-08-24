@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -9,7 +10,7 @@ from criteria_parser import (
     RequirementFlags,
     finalize_criteria,
 )
-from matcher import evaluate_listing_criteria, passes_hard_constraints
+from matcher import criterion_mode, evaluate_listing_criteria, passes_hard_constraints
 
 
 def listing(**overrides):
@@ -87,6 +88,10 @@ class ScoringTests(unittest.TestCase):
         metro = next(item for item in evaluation["breakdown"] if item["key"] == "near_metro")
         self.assertEqual(metro["status"], "unknown")
         self.assertEqual(metro["points"], 0)
+
+    def test_missing_criterion_modes_uses_safe_default(self):
+        legacy_criteria = SimpleNamespace()
+        self.assertEqual(criterion_mode(legacy_criteria, "location", "hard"), "hard")
 
 
 if __name__ == "__main__":

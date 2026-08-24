@@ -14,6 +14,11 @@ sunan Streamlit uygulaması.
 - Her kriter için zorunlu, tercih veya önemsiz seçimi
 - Karşılanan, kısmen karşılanan, karşılanmayan ve verisi bilinmeyen kriter dökümü
 - Müşteri profili, talep notları ve gönderilen ilan geçmişi
+- TAKS, KAKS ve kat sınırını birlikte değerlendiren arsa yapılaşma hesabı
+- İmar, tapu, fiziksel durum, altyapı ve bölgesel potansiyel arsa risk puanı
+- Her arsa bilgi grubu için kaynak ve veri güven düzeyi
+- Kötümser, normal ve iyimser proje fizibilitesi
+- Karşılaştırılabilir örnek arsa portföyü ve CSV dışa aktarma
 - 2-4 ilanı oturum durumuyla karşılaştırma
 - WhatsApp müşteri sunumu
 - CSV portföy yönetimi ve dışa aktarma
@@ -60,6 +65,7 @@ real-estate-matcher/app.py
 
 GitHub'daki `main` dalına gönderilen her commit Streamlit Cloud tarafından otomatik
 olarak yeniden yayınlanır. Uygulama veriyi `real-estate-matcher/data/listings.csv`
+dosyasından, örnek arsa portföyünü ise `real-estate-matcher/data/lands.csv`
 dosyasından okur.
 
 Müşteri kayıtları yerel kullanımda `data/customers.json` dosyasında tutulur ve bu
@@ -79,6 +85,17 @@ Zorunlu bir kriter karşılanmazsa ilan kesin sonuçlardan elenir. Tercih kriter
 sonuçları elemez, yalnızca sıralamayı etkiler. `Ferah`, `lüks` ve `sakin` gibi ilan
 verisinden güvenilir biçimde doğrulanamayan öznel istekler kullanıcıya gösterilir,
 ancak uyum yüzdesine puan eklemez.
+
+## Arsa hesaplarının kapsamı
+
+Yapılaşma ekranı TAKS ile taban oturumunu, KAKS ile emsale dâhil alanı ve maksimum
+kat sınırını ayrı ayrı hesaplar; en kısıtlayıcı değeri sonuç olarak kullanır. Risk
+ekranı puanı ve veri güvenini ayrı gösterir. Fizibilite ekranı maliyet ve satış
+varsayımlarını kötü, normal ve iyi senaryolarda karşılaştırır.
+
+Bu sonuçlar ön fizibilite amaçlıdır. İmar plan notları, çekme mesafeleri, tapu
+kayıtları, zemin etüdü, ruhsat koşulları ve ilgili kurum kararları resmî belgelerden
+ayrıca doğrulanmalıdır.
 
 ## Veri üretimi
 

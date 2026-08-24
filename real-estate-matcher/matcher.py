@@ -337,7 +337,8 @@ def _legacy_calculate_match_score(
 
 
 def criterion_mode(criteria: CustomerCriteria, key: str, default: str) -> str:
-    mode = criteria.criterion_modes.get(key, default)
+    modes = getattr(criteria, "criterion_modes", {}) or {}
+    mode = modes.get(key, default) if isinstance(modes, dict) else default
     return mode if mode in {"hard", "preference", "ignore"} else default
 
 
